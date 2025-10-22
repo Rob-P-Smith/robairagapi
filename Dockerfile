@@ -8,8 +8,9 @@ RUN apt-get update && apt-get install -y \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy robaimodeltools shared library first
+# Copy shared libraries
 COPY robaimodeltools/ ./robaimodeltools/
+COPY robaidata/ ./robaidata/
 
 # Copy requirements and install dependencies
 COPY robairagapi/requirements.txt .
