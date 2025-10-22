@@ -1,0 +1,13 @@
+# FastAPI Core
+fastapi==0.115.6
+uvicorn[standard]==0.32.1
+pydantic==2.10.4
+python-dotenv==1.0.1
+
+# HTTP Client (for health checks)
+httpx==0.28.1
+
+# Production (optional)
+gunicorn==23.0.0
+
+# Note: robaimodeltools dependencies are installed separately from robaimodeltools/requirements.txt

@@ -1,0 +1,377 @@
+"""
+RobAI RAG API Bridge - FastAPI Server
+
+Lightweight REST API that translates requests to MCP protocol
+and forwards them to the robairagmcp MCP server.
+"""
+
+import os
+import time
+import asyncio
+from typing import Dict, Any
+from datetime import datetime
+
+from fastapi import FastAPI, HTTPException, Depends, Request, Response, status
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from dotenv import load_dotenv
+
+# Import local modules
+from api.auth import verify_api_key, log_api_request, cleanup_sessions
+from api.models import (
+    CrawlRequest,
+    CrawlStoreRequest,
+    DeepCrawlStoreRequest,
+    SearchRequest,
+    KGSearchRequest,
+    MemoryListRequest,
+    ForgetUrlRequest,
+    BlockedDomainRequest,
+    UnblockDomainRequest,
+    HealthResponse,
+    StatusResponse
+)
+from mcp.client import get_mcp_client, MCPClient
+from mcp.translator import RESTToMCPTranslator, MCPToRESTTranslator
+from mcp.protocol import MCPError
+
+# Load environment variables
+load_dotenv()
+
+# Initialize translators
+rest_to_mcp = RESTToMCPTranslator()
+mcp_to_rest = MCPToRESTTranslator()
+
+
+def create_app() -> FastAPI:
+    """Create and configure FastAPI application"""
+    
+    app = FastAPI(
+        title="RobAI RAG API Bridge",
+        description="REST API bridge to robairagmcp MCP server",
+        version="1.0.0",
+        docs_url="/docs",
+        redoc_url="/redoc"
+    )
+
+    # CORS middleware
+    if os.getenv("ENABLE_CORS", "true").lower() == "true":
+        cors_origins = os.getenv("CORS_ORIGINS", "*").split(",")
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=cors_origins,
+            allow_credentials=True,
+            allow_methods=["*"],
+            allow_headers=["*"],
+        )
+
+    # Session cleanup background task
+    async def session_cleanup_task():
+        """Cleanup expired sessions periodically"""
+        while True:
+            await asyncio.sleep(3600)  # Every hour
+            cleanup_sessions()
+
+    @app.on_event("startup")
+    async def startup_event():
+        """Initialize MCP connection and start background tasks"""
+        print("🚀 Starting RobAI RAG API Bridge", flush=True)
+        
+        # Initialize MCP client
+        try:
+            mcp_client = get_mcp_client()
+            mcp_client.connect()
+            await mcp_client.initialize()
+            print(f"✓ MCP client initialized and connected", flush=True)
+        except Exception as e:
+            print(f"⚠️  MCP client initialization failed: {e}", flush=True)
+            print(f"   API will attempt to reconnect on first request", flush=True)
+
+        # Start background tasks
+        asyncio.create_task(session_cleanup_task())
+
+    @app.on_event("shutdown")
+    async def shutdown_event():
+        """Cleanup on shutdown"""
+        print("Shutting down API bridge", flush=True)
+        mcp_client = get_mcp_client()
+        mcp_client.disconnect()
+
+    # Middleware for request timing
+    @app.middleware("http")
+    async def add_process_time_header(request: Request, call_next):
+        """Add processing time header to responses"""
+        start_time = time.time()
+        response = await call_next(request)
+        process_time = time.time() - start_time
+        response.headers["X-Process-Time"] = str(round(process_time * 1000, 2))
+        return response
+
+    # Exception handler
+    @app.exception_handler(Exception)
+    async def global_exception_handler(request: Request, exc: Exception):
+        """Global exception handler"""
+        return JSONResponse(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            content={
+                "success": False,
+                "error": str(exc),
+                "timestamp": datetime.now().isoformat()
+            }
+        )
+
+    # ========== Health & Status Endpoints ==========
+
+    @app.get("/health", response_model=HealthResponse, tags=["System"])
+    async def health_check():
+        """Health check endpoint (no auth required)"""
+        mcp_client = get_mcp_client()
+        
+        return HealthResponse(
+            status="healthy",
+            timestamp=datetime.now().isoformat(),
+            mcp_connected=mcp_client.is_connected(),
+            version="1.0.0"
+        )
+
+    @app.get("/api/v1/status", response_model=StatusResponse, tags=["System"])
+    async def get_status(session: Dict = Depends(verify_api_key)):
+        """Get detailed system status"""
+        mcp_client = get_mcp_client()
+        
+        return StatusResponse(
+            api_status="running",
+            mcp_status="connected" if mcp_client.is_connected() else "disconnected",
+            timestamp=datetime.now().isoformat(),
+            components={
+                "mcp_host": mcp_client.host,
+                "mcp_port": mcp_client.port,
+                "mcp_connected": mcp_client.is_connected()
+            }
+        )
+
+    # ========== Crawling Endpoints ==========
+
+    @app.post("/api/v1/crawl", tags=["Crawling"])
+    async def crawl_url(
+        request: CrawlRequest,
+        session: Dict = Depends(verify_api_key)
+    ):
+        """Crawl a URL without storing it"""
+        mcp_client = get_mcp_client()
+        tool_name, arguments = rest_to_mcp.crawl_to_mcp(request)
+        
+        try:
+            result = await mcp_client.call_tool(tool_name, arguments)
+            return mcp_to_rest.mcp_to_rest(result)
+        except MCPError as e:
+            raise HTTPException(status_code=500, detail=e.message)
+
+    @app.post("/api/v1/crawl/store", tags=["Crawling"])
+    async def crawl_and_store(
+        request: CrawlStoreRequest,
+        session: Dict = Depends(verify_api_key)
+    ):
+        """Crawl a URL and store it permanently"""
+        mcp_client = get_mcp_client()
+        tool_name, arguments = rest_to_mcp.crawl_store_to_mcp(request, "permanent")
+        
+        try:
+            result = await mcp_client.call_tool(tool_name, arguments)
+            return mcp_to_rest.mcp_to_rest(result)
+        except MCPError as e:
+            raise HTTPException(status_code=500, detail=e.message)
+
+    @app.post("/api/v1/crawl/temp", tags=["Crawling"])
+    async def crawl_temp(
+        request: CrawlStoreRequest,
+        session: Dict = Depends(verify_api_key)
+    ):
+        """Crawl a URL and store temporarily (session only)"""
+        mcp_client = get_mcp_client()
+        tool_name, arguments = rest_to_mcp.crawl_store_to_mcp(request, "session_only")
+        
+        try:
+            result = await mcp_client.call_tool(tool_name, arguments)
+            return mcp_to_rest.mcp_to_rest(result)
+        except MCPError as e:
+            raise HTTPException(status_code=500, detail=e.message)
+
+    @app.post("/api/v1/crawl/deep/store", tags=["Crawling"])
+    async def deep_crawl_and_store(
+        request: DeepCrawlStoreRequest,
+        session: Dict = Depends(verify_api_key)
+    ):
+        """Deep crawl multiple pages and store all content"""
+        mcp_client = get_mcp_client()
+        tool_name, arguments = rest_to_mcp.deep_crawl_store_to_mcp(request)
+        
+        try:
+            result = await mcp_client.call_tool(tool_name, arguments)
+            return mcp_to_rest.mcp_to_rest(result)
+        except MCPError as e:
+            raise HTTPException(status_code=500, detail=e.message)
+
+    # ========== Search Endpoints ==========
+
+    @app.post("/api/v1/search", tags=["Search"])
+    @app.post("/api/v1/search/simple", tags=["Search"])
+    async def search(
+        request: SearchRequest,
+        session: Dict = Depends(verify_api_key)
+    ):
+        """Simple vector similarity search"""
+        mcp_client = get_mcp_client()
+        tool_name, arguments = rest_to_mcp.search_to_mcp(request)
+        
+        try:
+            result = await mcp_client.call_tool(tool_name, arguments)
+            return mcp_to_rest.mcp_to_rest(result)
+        except MCPError as e:
+            raise HTTPException(status_code=500, detail=e.message)
+
+    @app.post("/api/v1/search/kg", tags=["Search"])
+    async def kg_search(
+        request: KGSearchRequest,
+        session: Dict = Depends(verify_api_key)
+    ):
+        """Knowledge Graph-enhanced search"""
+        mcp_client = get_mcp_client()
+        tool_name, arguments = rest_to_mcp.kg_search_to_mcp(request)
+        
+        try:
+            result = await mcp_client.call_tool(tool_name, arguments)
+            return mcp_to_rest.mcp_to_rest(result)
+        except MCPError as e:
+            raise HTTPException(status_code=500, detail=e.message)
+
+    # ========== Memory Management Endpoints ==========
+
+    @app.get("/api/v1/memory", tags=["Memory"])
+    async def list_memory(
+        filter: str = None,
+        limit: int = 100,
+        session: Dict = Depends(verify_api_key)
+    ):
+        """List all stored content"""
+        mcp_client = get_mcp_client()
+        tool_name, arguments = rest_to_mcp.list_memory_to_mcp(filter, limit)
+        
+        try:
+            result = await mcp_client.call_tool(tool_name, arguments)
+            return mcp_to_rest.mcp_to_rest(result)
+        except MCPError as e:
+            raise HTTPException(status_code=500, detail=e.message)
+
+    @app.delete("/api/v1/memory", tags=["Memory"])
+    async def forget_url(
+        url: str,
+        session: Dict = Depends(verify_api_key)
+    ):
+        """Remove specific URL from memory"""
+        from api.models import ForgetUrlRequest
+        
+        mcp_client = get_mcp_client()
+        request_obj = ForgetUrlRequest(url=url)
+        tool_name, arguments = rest_to_mcp.forget_url_to_mcp(request_obj)
+        
+        try:
+            result = await mcp_client.call_tool(tool_name, arguments)
+            return mcp_to_rest.mcp_to_rest(result)
+        except MCPError as e:
+            raise HTTPException(status_code=500, detail=e.message)
+
+    @app.delete("/api/v1/memory/temp", tags=["Memory"])
+    async def clear_temp_memory(session: Dict = Depends(verify_api_key)):
+        """Clear all temporary content"""
+        mcp_client = get_mcp_client()
+        tool_name, arguments = rest_to_mcp.clear_temp_to_mcp()
+        
+        try:
+            result = await mcp_client.call_tool(tool_name, arguments)
+            return mcp_to_rest.mcp_to_rest(result)
+        except MCPError as e:
+            raise HTTPException(status_code=500, detail=e.message)
+
+    # ========== Statistics Endpoints ==========
+
+    @app.get("/api/v1/stats", tags=["Statistics"])
+    @app.get("/api/v1/db/stats", tags=["Statistics"])
+    async def get_stats(session: Dict = Depends(verify_api_key)):
+        """Get database statistics"""
+        mcp_client = get_mcp_client()
+        tool_name, arguments = rest_to_mcp.db_stats_to_mcp()
+        
+        try:
+            result = await mcp_client.call_tool(tool_name, arguments)
+            return mcp_to_rest.mcp_to_rest(result)
+        except MCPError as e:
+            raise HTTPException(status_code=500, detail=e.message)
+
+    # ========== Domain Blocking Endpoints ==========
+
+    @app.get("/api/v1/blocked-domains", tags=["Domain Management"])
+    async def list_blocked_domains(session: Dict = Depends(verify_api_key)):
+        """List all blocked domain patterns"""
+        mcp_client = get_mcp_client()
+        tool_name, arguments = rest_to_mcp.list_blocked_domains_to_mcp()
+        
+        try:
+            result = await mcp_client.call_tool(tool_name, arguments)
+            return mcp_to_rest.mcp_to_rest(result)
+        except MCPError as e:
+            raise HTTPException(status_code=500, detail=e.message)
+
+    @app.post("/api/v1/blocked-domains", tags=["Domain Management"])
+    async def add_blocked_domain(
+        request: BlockedDomainRequest,
+        session: Dict = Depends(verify_api_key)
+    ):
+        """Add a domain pattern to blocklist"""
+        mcp_client = get_mcp_client()
+        tool_name, arguments = rest_to_mcp.add_blocked_domain_to_mcp(request)
+        
+        try:
+            result = await mcp_client.call_tool(tool_name, arguments)
+            return mcp_to_rest.mcp_to_rest(result)
+        except MCPError as e:
+            raise HTTPException(status_code=500, detail=e.message)
+
+    @app.delete("/api/v1/blocked-domains", tags=["Domain Management"])
+    async def remove_blocked_domain(
+        pattern: str,
+        keyword: str,
+        session: Dict = Depends(verify_api_key)
+    ):
+        """Remove a domain pattern from blocklist"""
+        from api.models import UnblockDomainRequest
+        
+        mcp_client = get_mcp_client()
+        request_obj = UnblockDomainRequest(pattern=pattern, keyword=keyword)
+        tool_name, arguments = rest_to_mcp.remove_blocked_domain_to_mcp(request_obj)
+        
+        try:
+            result = await mcp_client.call_tool(tool_name, arguments)
+            return mcp_to_rest.mcp_to_rest(result)
+        except MCPError as e:
+            raise HTTPException(status_code=500, detail=e.message)
+
+    # ========== Help Endpoint ==========
+
+    @app.get("/api/v1/help", tags=["Help"])
+    async def get_help(session: Dict = Depends(verify_api_key)):
+        """Get help documentation for all tools"""
+        mcp_client = get_mcp_client()
+        tool_name, arguments = rest_to_mcp.get_help_to_mcp()
+        
+        try:
+            result = await mcp_client.call_tool(tool_name, arguments)
+            return mcp_to_rest.mcp_to_rest(result)
+        except MCPError as e:
+            raise HTTPException(status_code=500, detail=e.message)
+
+    return app
+
+
+# Create app instance
+app = create_app()

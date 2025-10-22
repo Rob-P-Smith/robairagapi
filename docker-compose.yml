@@ -1,0 +1,10 @@
+services:
+  # API Bridge - Uses robaimodeltools shared library directly
+  robairagapi:
+    build:
+      context: ..
+      dockerfile: robairagapi/Dockerfile
+    image: robairagapi:latest
+    container_name: robairagapi
+    network_mode: "host"
+    restart: unless-stopped
