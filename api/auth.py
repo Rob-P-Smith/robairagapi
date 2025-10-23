@@ -126,8 +126,8 @@ def verify_api_key(credentials: HTTPAuthorizationCredentials = Security(security
 
     # Load all valid API keys from environment
     valid_keys = [
-        os.getenv("LOCAL_API_KEY"),
-        os.getenv("REMOTE_API_KEY_2"),
+        os.getenv("OPENAI_API_KEY"),
+        os.getenv("OPENAI_API_KEY_2"),
     ]
     # Filter out None values (unset environment variables)
     valid_keys = [key for key in valid_keys if key]

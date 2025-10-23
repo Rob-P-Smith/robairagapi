@@ -13,11 +13,11 @@ class Config:
 
     # API Server
     SERVER_HOST = os.getenv("SERVER_HOST", "0.0.0.0")
-    SERVER_PORT = int(os.getenv("SERVER_PORT", "8080"))
+    SERVER_PORT = int(os.getenv("SERVER_PORT", "8081"))
 
     # Authentication
-    LOCAL_API_KEY = os.getenv("LOCAL_API_KEY")
-    REMOTE_API_KEY_2 = os.getenv("REMOTE_API_KEY_2")
+    LOCAL_API_KEY = os.getenv("OPENAI_API_KEY")
+    REMOTE_API_KEY_2 = os.getenv("OPENAI_API_KEY_2")
 
     # Rate Limiting
     RATE_LIMIT_PER_MINUTE = int(os.getenv("RATE_LIMIT_PER_MINUTE", "60"))

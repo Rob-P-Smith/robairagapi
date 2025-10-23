@@ -175,19 +175,16 @@ def validate_mcp_response(response: dict) -> bool:
     if not isinstance(response, dict):
         return False
 
-    # Must have jsonrpc version
     if response.get("jsonrpc") != "2.0":
         return False
 
-    # Must have id (matching request)
     if "id" not in response:
         return False
 
-    # Must have either result or error, not both
     has_result = "result" in response
     has_error = "error" in response
 
-    if has_result == has_error:  # Both true or both false
+    if has_result == has_error:
         return False
 
     return True
