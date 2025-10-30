@@ -420,7 +420,7 @@ def create_app() -> FastAPI:
             "tools": [
                 {
                     "name": "crawl_url",
-                    "example": "Crawl http://www.example.com without storing",
+                    "example": "Crawl https://github.com/torvalds/linux without storing",
                     "parameters": "url: string"
                 },
                 {
