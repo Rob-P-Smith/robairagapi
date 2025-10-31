@@ -17,6 +17,7 @@ from dotenv import load_dotenv
 
 # Import local modules
 from api.auth import verify_api_key, log_api_request, cleanup_sessions
+from api.security import security_middleware
 from api.models import (
     CrawlRequest,
     CrawlStoreRequest,
@@ -54,6 +55,9 @@ def create_app() -> FastAPI:
         docs_url="/docs",
         redoc_url="/redoc"
     )
+
+    # Security middleware (MUST be before CORS and other middleware)
+    app.middleware("http")(security_middleware)
 
     # CORS middleware
     if os.getenv("ENABLE_CORS", "true").lower() == "true":
@@ -118,8 +122,8 @@ def create_app() -> FastAPI:
     # ========== Health & Status Endpoints ==========
 
     @app.get("/health", response_model=HealthResponse, tags=["System"])
-    async def health_check():
-        """Health check endpoint (no auth required)"""
+    async def health_check(session: Dict = Depends(verify_api_key)):
+        """Health check endpoint (requires bearer token authentication)"""
         return HealthResponse(
             status="healthy",
             timestamp=datetime.now().isoformat(),
@@ -413,8 +417,8 @@ def create_app() -> FastAPI:
     # ========== Help Endpoint ==========
 
     @app.get("/api/v1/help", tags=["Help"])
-    async def get_help():
-        """Get help documentation for all tools - NO AUTH for LLM providers"""
+    async def get_help(session: Dict = Depends(verify_api_key)):
+        """Get help documentation for all tools (requires bearer token authentication)"""
         help_data = {
             "success": True,
             "tools": [

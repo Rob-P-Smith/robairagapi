@@ -109,9 +109,44 @@ rate_limiter = RateLimiter()
 session_manager = SessionManager()
 
 
+def normalize_bearer_token(auth_header: str) -> Optional[str]:
+    """
+    Normalize Bearer token from Authorization header.
+
+    Handles:
+    - Case insensitivity (Bearer/bearer/BEARER)
+    - Extra whitespace
+    - Multiple spaces between Bearer and token
+
+    Args:
+        auth_header: Raw Authorization header value
+
+    Returns:
+        Normalized token or None if invalid format
+    """
+    if not auth_header:
+        return None
+
+    # Strip leading/trailing whitespace
+    auth_header = auth_header.strip()
+
+    # Check for "Bearer" prefix (case insensitive)
+    if not auth_header.lower().startswith("bearer "):
+        return None
+
+    # Remove "Bearer " prefix and extract token
+    # Split on whitespace and take the part after "Bearer"
+    parts = auth_header.split(None, 1)  # Split on any whitespace, max 2 parts
+    if len(parts) != 2:
+        return None
+
+    token = parts[1].strip()
+    return token if token else None
+
+
 def verify_api_key(credentials: HTTPAuthorizationCredentials = Security(security)) -> Dict[str, Any]:
     """
-    Verify API key from Authorization header
+    Verify API key from Authorization header with enhanced normalization
 
     Args:
         credentials: HTTPBearer credentials from request header
@@ -122,15 +157,21 @@ def verify_api_key(credentials: HTTPAuthorizationCredentials = Security(security
     Raises:
         HTTPException: If API key invalid or rate limit exceeded
     """
-    token = credentials.credentials
+    # Get raw token from credentials
+    raw_token = credentials.credentials
+
+    # Normalize the token (handle case, whitespace, etc.)
+    token = normalize_bearer_token(f"Bearer {raw_token}")
+    if not token:
+        token = raw_token.strip()  # Fallback: just strip whitespace
 
     # Load all valid API keys from environment
     valid_keys = [
         os.getenv("OPENAI_API_KEY"),
         os.getenv("OPENAI_API_KEY_2"),
     ]
-    # Filter out None values (unset environment variables)
-    valid_keys = [key for key in valid_keys if key]
+    # Filter out None values and normalize them
+    valid_keys = [key.strip() for key in valid_keys if key]
 
     if not valid_keys:
         raise HTTPException(
@@ -138,18 +179,25 @@ def verify_api_key(credentials: HTTPAuthorizationCredentials = Security(security
             detail="Server configuration error: No API keys configured"
         )
 
+    # Compare normalized tokens
     if token not in valid_keys:
+        # Log failed authentication attempt for security monitoring
+        token_preview = token[:8] + "..." if len(token) > 8 else token
+        print(f"⚠️  SECURITY: Failed authentication attempt - Invalid token: {token_preview}", flush=True)
+
+        # Return 404 to hide endpoint existence from attackers
         raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid API key",
-            headers={"WWW-Authenticate": "Bearer"},
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Not Found"
         )
 
     # Check rate limit
     if not rate_limiter.is_allowed(token):
+        print(f"⚠️  SECURITY: Rate limit exceeded for token: {token[:8]}...", flush=True)
+        # Return 404 to hide endpoint existence (even for rate limiting)
         raise HTTPException(
-            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail="Rate limit exceeded. Try again later."
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Not Found"
         )
 
     # Create session

@@ -32,6 +32,20 @@ class Config:
     ENABLE_CORS = os.getenv("ENABLE_CORS", "true").lower() == "true"
     CORS_ORIGINS = os.getenv("CORS_ORIGINS", "*")
 
+    # Security Settings
+    # pfSense firewall identification (for public proxy requests)
+    PFSENSE_IP = os.getenv("PFSENSE_IP", "192.168.10.1")
+    PFSENSE_MAC = os.getenv("PFSENSE_MAC", "58:9c:fc:10:ff:d8")
+
+    # Trusted LAN subnet for relaxed authentication
+    TRUSTED_LAN_SUBNET = os.getenv("TRUSTED_LAN_SUBNET", "192.168.10.0/24")
+
+    # Enable strict authentication checks for pfSense proxy requests
+    STRICT_AUTH_FOR_PFSENSE = os.getenv("STRICT_AUTH_FOR_PFSENSE", "true").lower() == "true"
+
+    # Enable MAC address validation (IP + MAC verification)
+    ENABLE_MAC_VALIDATION = os.getenv("ENABLE_MAC_VALIDATION", "true").lower() == "true"
+
     # Logging
     LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 
