@@ -45,6 +45,45 @@ crawl4ai_url = os.getenv("CRAWL4AI_URL", "http://localhost:11235")
 rag_system = Crawl4AIRAG(crawl4ai_url=crawl4ai_url)
 
 
+def simplify_schema(schema: dict) -> dict:
+    """Recursively simplify OpenAPI schema by removing anyOf patterns."""
+    import copy
+
+    # Deep copy to avoid modifying original
+    result = copy.deepcopy(schema)
+
+    if isinstance(result, dict):
+        # Handle anyOf pattern
+        if "anyOf" in result:
+            # Extract the non-null type
+            for option in result["anyOf"]:
+                if isinstance(option, dict) and option.get("type") != "null":
+                    # Replace anyOf with the non-null type
+                    non_null_schema = copy.deepcopy(option)
+                    # Preserve parent-level fields
+                    for key in ["title", "description", "default"]:
+                        if key in result and key not in non_null_schema:
+                            non_null_schema[key] = result[key]
+                    # Remove anyOf
+                    result = non_null_schema
+                    break
+
+        # Clean up numeric constraints (1000.0 -> 1000)
+        for key in ["maximum", "minimum"]:
+            if key in result and isinstance(result[key], float):
+                if result[key].is_integer():
+                    result[key] = int(result[key])
+
+        # Recursively process nested objects
+        for key, value in list(result.items()):
+            if isinstance(value, dict):
+                result[key] = simplify_schema(value)
+            elif isinstance(value, list):
+                result[key] = [simplify_schema(item) if isinstance(item, dict) else item for item in value]
+
+    return result
+
+
 def create_app() -> FastAPI:
     """Create and configure FastAPI application"""
 
@@ -91,10 +130,12 @@ def create_app() -> FastAPI:
         # Start background tasks
         asyncio.create_task(session_cleanup_task())
 
+
     @app.on_event("shutdown")
     async def shutdown_event():
         """Cleanup on shutdown"""
         print("Shutting down RAG API", flush=True)
+
 
     # Middleware for request timing
     @app.middleware("http")
@@ -122,8 +163,8 @@ def create_app() -> FastAPI:
     # ========== Health & Status Endpoints ==========
 
     @app.get("/health", response_model=HealthResponse, tags=["System"])
-    async def health_check(session: Dict = Depends(verify_api_key)):
-        """Health check endpoint (requires bearer token authentication)"""
+    async def health_check():
+        """Health check endpoint (no authentication required for Docker healthchecks)"""
         return HealthResponse(
             status="healthy",
             timestamp=datetime.now().isoformat(),
@@ -228,7 +269,6 @@ def create_app() -> FastAPI:
     # ========== Search Endpoints ==========
 
     @app.post("/api/v1/search", tags=["Search"])
-    @app.post("/api/v1/search/simple", tags=["Search"])
     async def search(
         request: SearchRequest,
         session: Dict = Depends(verify_api_key)
@@ -521,6 +561,46 @@ def create_app() -> FastAPI:
             "timestamp": datetime.now().isoformat()
         }
         return help_data
+
+    # Custom OpenAPI schema generator with simplified schemas for Cline compatibility
+    def custom_openapi():
+        """Generate OpenAPI schema with simplified schemas (no anyOf patterns)."""
+        if app.openapi_schema:
+            return app.openapi_schema
+
+        from fastapi.openapi.utils import get_openapi
+
+        # Generate base schema
+        openapi_schema = get_openapi(
+            title=app.title,
+            version=app.version,
+            description=app.description,
+            routes=app.routes,
+        )
+
+        # Simplify all component schemas
+        if "components" in openapi_schema and "schemas" in openapi_schema["components"]:
+            for schema_name, schema_def in openapi_schema["components"]["schemas"].items():
+                openapi_schema["components"]["schemas"][schema_name] = simplify_schema(schema_def)
+
+        # Simplify all path parameter schemas
+        if "paths" in openapi_schema:
+            for path, path_item in openapi_schema["paths"].items():
+                for method, operation in path_item.items():
+                    if method in ["get", "post", "put", "delete", "patch"]:
+                        # Simplify requestBody schemas
+                        if "requestBody" in operation:
+                            operation["requestBody"] = simplify_schema(operation["requestBody"])
+                        # Simplify parameter schemas
+                        if "parameters" in operation:
+                            operation["parameters"] = [simplify_schema(p) for p in operation["parameters"]]
+
+        # Cache the simplified schema
+        app.openapi_schema = openapi_schema
+        return app.openapi_schema
+
+    # Override the openapi method
+    app.openapi = custom_openapi
 
     return app
 
