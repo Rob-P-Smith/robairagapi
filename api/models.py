@@ -52,7 +52,7 @@ class DeepCrawlStoreRequest(DeepCrawlRequest):
 class SearchRequest(BaseModel):
     """Request model for simple vector search"""
     query: str = Field(..., description="Search query")
-    limit: Optional[int] = Field(10, ge=1, le=1000, description="Number of results")
+    limit: Optional[int] = Field(2, ge=1, le=4, description="Number of results")
     tags: Optional[str] = Field(None, description="Comma-separated tags to filter by (ANY match)")
 
     @validator('query')
@@ -69,8 +69,8 @@ class SearchRequest(BaseModel):
 class KGSearchRequest(BaseModel):
     """Request model for Knowledge Graph-enhanced search"""
     query: str = Field(..., description="Search query")
-    rag_limit: Optional[int] = Field(5, ge=1, le=100, description="Number of RAG (vector) results")
-    kg_limit: Optional[int] = Field(10, ge=1, le=100, description="Number of KG (graph) results")
+    rag_limit: Optional[int] = Field(1, ge=1, le=5, description="Number of RAG (vector) results")
+    kg_limit: Optional[int] = Field(3, ge=1, le=10, description="Number of KG (graph) results")
     tags: Optional[str] = Field(None, description="Comma-separated tags to filter by")
     enable_expansion: Optional[bool] = Field(True, description="Enable KG entity expansion")
     include_context: Optional[bool] = Field(True, description="Include context snippets")
@@ -87,8 +87,10 @@ class KGSearchRequest(BaseModel):
 
 
 class EnhancedSearchRequest(BaseModel):
-    """Request model for Enhanced Search - Predefined optimized search with fixed parameters"""
+    """Request model for Enhanced Search - Optimized search with focused results"""
     query: str = Field(..., description="Search query")
+    rag_limit: Optional[int] = Field(1, ge=1, le=5, description="Number of RAG (vector) results")
+    kg_limit: Optional[int] = Field(10, ge=1, le=20, description="Number of KG chunks to return")
     tags: Optional[str] = Field(None, description="Comma-separated tags to filter by")
 
     @validator('query')

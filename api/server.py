@@ -290,41 +290,18 @@ def create_app() -> FastAPI:
         request: KGSearchRequest,
         session: Dict = Depends(verify_api_key)
     ):
-        """Knowledge Graph-enhanced search (uses intelligent tag-based expansion)"""
-        try:
-            # Use target_search which provides tag discovery and expansion
-            result = await rag_system.target_search(
-                query=request.query,
-                initial_limit=request.rag_limit or 5,
-                expanded_limit=request.kg_limit or 10
-            )
-            return {"success": True, "data": result, "timestamp": datetime.now().isoformat()}
-        except Exception as e:
-            log_error("api_kg_search", e, request.query)
-            raise HTTPException(status_code=500, detail=str(e))
-
-    @app.post("/api/v1/search/enhanced", tags=["Search"])
-    async def enhanced_search(
-        request: EnhancedSearchRequest,
-        session: Dict = Depends(verify_api_key)
-    ):
         """
-        Enhanced Search - Predefined Optimized Search (Phase 1-5 Pipeline):
+        KG Search - Full 5-Phase Knowledge Graph Pipeline:
 
-        This is a highly optimized, predefined search configuration using the complete KG pipeline:
+        Complete comprehensive search using all phases:
         - Phase 1: GLiNER entity extraction + query embedding
-        - Phase 2: Parallel vector + Neo4j graph search (up to 100 entities)
-        - Phase 3: KG-powered entity expansion (always enabled)
+        - Phase 2: Parallel vector + Neo4j graph search
+        - Phase 3: KG-powered entity expansion (configurable)
         - Phase 4: Multi-signal ranking (5 signals: vector similarity, graph connectivity, entity density, recency, tag match)
-        - Phase 5: Formatted results with full markdown content
+        - Phase 5: Context extraction and formatted results
 
-        Fixed Configuration:
-        - Returns exactly 3 RAG results with FULL MARKDOWN content
-        - Returns exactly 5 KG results with referenced chunks
-        - Entity expansion: ALWAYS ENABLED
-        - Context extraction: ALWAYS ENABLED
-
-        This is the most comprehensive search - use for complex queries requiring deep knowledge graph analysis.
+        Returns separate RAG and KG result sets with full context.
+        Most comprehensive search for complex queries requiring deep knowledge graph analysis.
         """
         try:
             import asyncio
@@ -338,21 +315,76 @@ def create_app() -> FastAPI:
             # Get KG service URL from environment
             kg_service_url = os.getenv("KG_SERVICE_URL", "http://localhost:8088")
 
-            # Initialize SearchHandler with complete pipeline
+            # Initialize SearchHandler (5-phase pipeline)
             handler = SearchHandler(
                 db_manager=GLOBAL_DB,
                 kg_service_url=kg_service_url
             )
 
-            # Execute enhanced search with FIXED PARAMETERS (predefined optimization)
+            # Execute 5-phase search
             result = await asyncio.to_thread(
                 handler.search_separate,
                 query=request.query,
-                rag_limit=3,  # FIXED: Always return top 3 RAG results with full markdown
-                kg_limit=5,   # FIXED: Always return top 5 KG results with referenced chunks
+                rag_limit=request.rag_limit or 5,
+                kg_limit=request.kg_limit or 10,
                 tags=tags_list,
-                enable_expansion=True,   # FIXED: Always enabled for comprehensive results
-                include_context=True     # FIXED: Always enabled for context extraction
+                enable_expansion=request.enable_expansion if hasattr(request, 'enable_expansion') else True,
+                include_context=request.include_context if hasattr(request, 'include_context') else True
+            )
+
+            return {"success": True, "data": result, "timestamp": datetime.now().isoformat()}
+        except Exception as e:
+            log_error("api_kg_search", e, request.query)
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.post("/api/v1/search/enhanced", tags=["Search"])
+    async def enhanced_search(
+        request: EnhancedSearchRequest,
+        session: Dict = Depends(verify_api_key)
+    ):
+        """
+        Enhanced Search - Optimized KG Search with Focused Results:
+
+        Returns focused, high-quality results optimized for manageable data transfer:
+        - 1 top RAG vector result (100K character limit)
+        - 10 KG chunks with targeted entity mentions
+        - 1 top KG document (100K character limit, guaranteed different URL from RAG)
+
+        Pipeline:
+        - GLiNER entity extraction
+        - Parallel vector search + Neo4j graph search (fetches 250 chunks)
+        - Chunk aggregation to documents (up to 20 documents)
+        - Entity density ranking
+        - Top result selection
+
+        Data Size: ~200-250KB (90% smaller than full pipeline)
+        Best for: Getting comprehensive context with controlled data size
+        """
+        try:
+            import asyncio
+            from robaimodeltools.search.enhanced_search import get_enhanced_search_orchestrator
+
+            # Parse tags
+            tags_list = None
+            if request.tags:
+                tags_list = [tag.strip() for tag in request.tags.split(',') if tag.strip()]
+
+            # Get KG service URL from environment
+            kg_service_url = os.getenv("KG_SERVICE_URL", "http://localhost:8088")
+
+            # Initialize EnhancedSearchOrchestrator
+            orchestrator = get_enhanced_search_orchestrator(
+                db_manager=GLOBAL_DB,
+                kg_service_url=kg_service_url
+            )
+
+            # Execute enhanced search (returns: rag_result, kg_chunks, kg_document)
+            result = await asyncio.to_thread(
+                orchestrator.search,
+                query=request.query,
+                rag_limit=request.rag_limit or 1,
+                kg_limit=request.kg_limit or 10,
+                tags=tags_list
             )
 
             return {"success": True, "data": result, "timestamp": datetime.now().isoformat()}
@@ -485,18 +517,19 @@ def create_app() -> FastAPI:
                 {
                     "name": "simple_search",
                     "example": "Simple vector similarity search for 'FastAPI authentication' without KG enhancement",
-                    "parameters": "query: string, limit?: number (default 10, max 1000), tags?: string (comma-separated tags for filtering)"
+                    "parameters": "query: string, limit?: number (default 10, max 1000), tags?: string (comma-separated), min_similarity?: number (default 0.2), max_content_length?: number (default 10000)"
                 },
                 {
                     "name": "kg_search",
-                    "example": "KG-enhanced search for 'FastAPI async' with intelligent tag expansion",
-                    "parameters": "query: string, rag_limit?: number (default 5, max 100), kg_limit?: number (default 10, max 100), tags?: string, enable_expansion?: boolean (default true), include_context?: boolean (default true)"
+                    "example": "Full 5-phase KG pipeline: 'React performance optimization' - comprehensive entity extraction, graph traversal, and multi-signal ranking",
+                    "parameters": "query: string, rag_limit?: number (default 5), kg_limit?: number (default 10), tags?: string, enable_expansion?: boolean (default true), include_context?: boolean (default true)",
+                    "description": "Complete 5-phase knowledge graph search: GLiNER entity extraction, parallel vector+graph search (Neo4j), KG entity expansion, multi-signal ranking (5 signals: vector similarity, graph connectivity, entity density, recency, tag match), context extraction. Most comprehensive search for complex queries requiring deep knowledge graph analysis."
                 },
                 {
                     "name": "enhanced_search",
-                    "example": "Advanced search using full KG pipeline: 'React performance optimization techniques' - Returns 3 RAG results with FULL MARKDOWN + 5 KG results with referenced chunks",
-                    "parameters": "query: string (required), tags?: string (optional comma-separated filter)",
-                    "description": "PREDEFINED OPTIMIZED SEARCH - Most comprehensive search with FIXED configuration: Always returns exactly 3 RAG results with complete markdown content and 5 KG results with referenced chunks. Uses complete 5-phase pipeline: GLiNER entity extraction, parallel vector+graph search (Neo4j), KG entity expansion (always on), multi-signal ranking, full markdown content. Entity expansion and context extraction are always enabled. Use this for complex queries requiring deep knowledge graph analysis with full content."
+                    "example": "Optimized KG search for 'FastAPI async patterns' - Returns 1 top RAG result + 10 entity-rich chunks + 1 top KG document",
+                    "parameters": "query: string, rag_limit?: number (default 1), kg_limit?: number (default 10), tags?: string",
+                    "description": "Optimized search returning focused results: 1 top RAG vector result (100K char limit), 10 KG chunks (targeted entity mentions), 1 top KG document (100K char limit, different URL from RAG). Fetches 250 chunks from KG service, aggregates to 20 documents, returns top-ranked results. Best for getting comprehensive context with manageable data size (~200-250KB vs 1-4MB)."
                 },
                 {
                     "name": "list_memory",
