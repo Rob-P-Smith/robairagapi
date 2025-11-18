@@ -1,4 +1,4 @@
-FROM python:3.11-slim
+FROM python:3.12-slim
 
 # Set working directory
 WORKDIR /app
@@ -8,15 +8,8 @@ RUN apt-get update && apt-get install -y \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy shared libraries
-COPY robaimodeltools/ ./robaimodeltools/
-COPY robaidata/ ./robaidata/
-
-# Copy requirements and install dependencies
-COPY robairagapi/requirements.txt .
-RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir -r requirements.txt && \
-    pip install --no-cache-dir -r robaimodeltools/requirements.txt
+# Create symlink so robaivenv python symlinks work
+RUN ln -s /usr/local/bin/python3 /usr/bin/python3
 
 # Copy application code
 COPY robairagapi/api/ ./api/
@@ -29,5 +22,10 @@ RUN useradd -m -u 1000 apiuser && \
 # Switch to non-root user
 USER apiuser
 
+# Set environment variables
+# venv will be mounted at /venv, prepend to PATH
+ENV PATH="/venv/bin:$PATH"
+ENV PYTHONPATH="/app:/robaitools"
+
 # Run API server
-CMD ["python3", "main.py"]
+CMD python3 main.py

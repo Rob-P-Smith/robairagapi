@@ -122,10 +122,8 @@ def create_app() -> FastAPI:
         print("🚀 Starting RobAI RAG API", flush=True)
         print(f"   Crawl4AI URL: {crawl4ai_url}", flush=True)
 
-        # Initialize database (critical for memory mode)
-        print("📊 Initializing database...", flush=True)
-        await GLOBAL_DB.initialize_async()
-        print("✅ Database initialized successfully", flush=True)
+        # Database initialization no longer needed - KGServiceClient is HTTP-only
+        print("✅ Database client ready (kg-service HTTP)", flush=True)
 
         # Start background tasks
         asyncio.create_task(session_cleanup_task())
