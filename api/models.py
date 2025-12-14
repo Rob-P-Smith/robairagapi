@@ -12,12 +12,21 @@ from api.validation import validate_url, validate_string_length
 class CrawlRequest(BaseModel):
     """Request model for basic URL crawling"""
     url: str = Field(..., description="URL to crawl")
+    max_chars: Optional[int] = Field(5000, description="Maximum characters to return (5000-25000)")
 
     @validator('url')
     def validate_url_field(cls, v):
         if not validate_url(v):
             raise ValueError('Invalid or unsafe URL provided')
         return v
+
+    @validator('max_chars')
+    def validate_max_chars(cls, v):
+        if v is not None and v < 5000:
+            raise ValueError('max_chars must be >= 5000')
+        if v is not None and v > 25000:
+            raise ValueError('max_chars must be <= 25000')
+        return v if v is not None else 5000
 
 
 class CrawlStoreRequest(CrawlRequest):
@@ -50,20 +59,33 @@ class DeepCrawlStoreRequest(DeepCrawlRequest):
 
 
 class SearchRequest(BaseModel):
-    """Request model for simple vector search"""
-    query: str = Field(..., description="Search query")
-    limit: Optional[int] = Field(2, ge=1, le=4, description="Number of results")
-    tags: Optional[str] = Field(None, description="Comma-separated tags to filter by (ANY match)")
+    """Request model for GraphRAG hybrid vector + graph search"""
+    term: str = Field(..., description="Search term or query")
+    depth: Optional[str] = Field("medium", description="Search depth: low, medium, high, or all")
+    limit: Optional[int] = Field(10, ge=1, le=500, description="Maximum number of results (1-500)")
+
+    @validator('term')
+    def validate_term(cls, v):
+        return validate_string_length(v, 500, "term")
+
+    @validator('depth')
+    def validate_depth(cls, v):
+        if v not in ["low", "medium", "high", "all"]:
+            raise ValueError(f"Invalid depth '{v}'. Must be: low, medium, high, or all")
+        return v
+
+
+class WebSearchRequest(BaseModel):
+    """Request model for web search via Serper API"""
+    query: str = Field(..., description="Search query string")
+    num_results: Optional[int] = Field(10, ge=1, le=20, description="Maximum number of results (1-20)")
+    max_chars_per_result: Optional[int] = Field(500, ge=100, le=15000, description="Max characters per result snippet")
 
     @validator('query')
     def validate_query(cls, v):
+        if not v or len(v.strip()) < 2:
+            raise ValueError("Query must be at least 2 characters")
         return validate_string_length(v, 500, "query")
-
-    @validator('tags')
-    def validate_tags(cls, v):
-        if v:
-            return validate_string_length(v, 500, "tags")
-        return v
 
 
 class KGSearchRequest(BaseModel):

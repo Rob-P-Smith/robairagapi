@@ -1,7 +1,7 @@
 """
 RobAI RAG API - FastAPI Server
 
-REST API that provides direct access to RAG operations via robaimodeltools shared library.
+REST API that provides access to RAG operations via self-contained toolactions.
 """
 
 import os
@@ -18,31 +18,26 @@ from dotenv import load_dotenv
 # Import local modules
 from api.auth import verify_api_key, log_api_request, cleanup_sessions
 from api.security import security_middleware
+from api.tool_discovery import init_discovery_service, get_discovery_service
 from api.models import (
     CrawlRequest,
     CrawlStoreRequest,
     DeepCrawlStoreRequest,
     SearchRequest,
-    KGSearchRequest,
-    EnhancedSearchRequest,
-    MemoryListRequest,
-    ForgetUrlRequest,
-    BlockedDomainRequest,
-    UnblockDomainRequest,
+    WebSearchRequest,
     HealthResponse,
     StatusResponse
 )
 
-# Direct imports from shared robaimodeltools
-from robaimodeltools.operations.crawler import Crawl4AIRAG
-from robaimodeltools.data.storage import GLOBAL_DB, log_error
+# Direct imports from toolactions
+from api.toolactions.operations import crawl_operations, search_operations, deep_crawl, serper_search, stats_operations
+from api.toolactions.data import storage as toolactions_storage
 
 # Load environment variables
 load_dotenv()
 
-# Initialize RAG system
+# Crawl4AI URL for toolactions
 crawl4ai_url = os.getenv("CRAWL4AI_URL", "http://localhost:11235")
-rag_system = Crawl4AIRAG(crawl4ai_url=crawl4ai_url)
 
 
 def simplify_schema(schema: dict) -> dict:
@@ -125,14 +120,28 @@ def create_app() -> FastAPI:
         # Database initialization no longer needed - KGServiceClient is HTTP-only
         print("✅ Database client ready (kg-service HTTP)", flush=True)
 
+        # Initialize tool discovery service
+        tools_service_url = os.getenv("TOOLS_SERVICE_URL", "http://localhost:8099")
+        tools_refresh_interval = int(os.getenv("TOOLS_REFRESH_INTERVAL", "30"))
+        discovery_service = init_discovery_service(tools_service_url, tools_refresh_interval)
+        print(f"🔧 Tool discovery service initialized: {tools_service_url}", flush=True)
+
         # Start background tasks
         asyncio.create_task(session_cleanup_task())
+        asyncio.create_task(discovery_service.start_refresh_loop())
 
 
     @app.on_event("shutdown")
     async def shutdown_event():
         """Cleanup on shutdown"""
         print("Shutting down RAG API", flush=True)
+
+        # Close tool discovery service HTTP client
+        try:
+            discovery_service = get_discovery_service()
+            await discovery_service.close()
+        except:
+            pass
 
 
     # Middleware for request timing
@@ -143,6 +152,35 @@ def create_app() -> FastAPI:
         response = await call_next(request)
         process_time = time.time() - start_time
         response.headers["X-Process-Time"] = str(round(process_time * 1000, 2))
+        return response
+
+    # Middleware to log all v2 tool calls for debugging
+    @app.middleware("http")
+    async def log_v2_tool_calls(request: Request, call_next):
+        """Log all /api/v2 requests to debug tool call format"""
+        import logging
+        logger = logging.getLogger("robairagapi.tool_calls")
+
+        if request.url.path.startswith("/api/v2"):
+            # Log the incoming tool call
+            logger.info(f"🔧 TOOL CALL: {request.method} {request.url.path}")
+
+            # For POST/PUT requests, log the body
+            if request.method in ("POST", "PUT", "PATCH"):
+                body = await request.body()
+                body_str = body.decode('utf-8', errors='ignore')
+                logger.info(f"🔧 TOOL BODY: {body_str[:1000]}{'...' if len(body_str) > 1000 else ''}")
+
+                # Create a new request with the cached body
+                async def receive():
+                    return {"type": "http.request", "body": body}
+                request._receive = receive
+            else:
+                # GET requests - log query params if any
+                if request.query_params:
+                    logger.info(f"🔧 TOOL PARAMS: {dict(request.query_params)}")
+
+        response = await call_next(request)
         return response
 
     # Exception handler
@@ -170,6 +208,55 @@ def create_app() -> FastAPI:
             version="1.0.0"
         )
 
+    @app.get("/api/v1/tools/list", tags=["Tools"])
+    async def list_tools():
+        """
+        Get all available LLM tools in OpenAI function calling format.
+
+        This is a public endpoint (no authentication required).
+        Tools are cached and refreshed every 30 seconds from robaiLLMtools service.
+
+        Returns:
+            List of tool definitions in OpenAI format
+        """
+        try:
+            discovery_service = get_discovery_service()
+            tools = discovery_service.get_tools()
+            stats = discovery_service.get_stats()
+
+            return {
+                "success": True,
+                "tools": tools,
+                "count": len(tools),
+                "service_available": stats.get("service_available", False),
+                "last_refresh": stats.get("last_refresh"),
+                "timestamp": datetime.now().isoformat()
+            }
+        except RuntimeError as e:
+            # Service not initialized
+            return JSONResponse(
+                status_code=503,
+                content={
+                    "success": False,
+                    "error": "Tool discovery service not initialized",
+                    "tools": [],
+                    "count": 0,
+                    "timestamp": datetime.now().isoformat()
+                }
+            )
+        except Exception as e:
+            logger.error(f"Error listing tools: {e}", exc_info=True)
+            return JSONResponse(
+                status_code=500,
+                content={
+                    "success": False,
+                    "error": str(e),
+                    "tools": [],
+                    "count": 0,
+                    "timestamp": datetime.now().isoformat()
+                }
+            )
+
     @app.get("/api/v1/status", response_model=StatusResponse, tags=["System"])
     async def get_status(session: Dict = Depends(verify_api_key)):
         """Get detailed system status"""
@@ -185,29 +272,37 @@ def create_app() -> FastAPI:
 
     # ========== Crawling Endpoints ==========
 
-    @app.post("/api/v1/crawl", tags=["Crawling"])
-    async def crawl_url(
+    @app.post("/api/v2/crawl", tags=["Crawling V2"])
+    async def crawl_url_v2(
         request: CrawlRequest,
         session: Dict = Depends(verify_api_key)
     ):
-        """Crawl a URL without storing it"""
+        """
+        V2: Crawl a URL without storing it. Uses self-contained toolactions.
+        Supports max_chars parameter to control response length (5000-25000 chars).
+        """
         try:
-            result = await rag_system.crawl_url(request.url)
+            result = await crawl_operations.crawl_url(
+                crawl4ai_url,
+                request.url,
+                max_chars=request.max_chars
+            )
             return {"success": True, "data": result, "timestamp": datetime.now().isoformat()}
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
         except Exception as e:
-            log_error("api_crawl_url", e, request.url)
+            toolactions_storage.log_error("api_crawl_url_v2", e, request.url)
             raise HTTPException(status_code=500, detail=str(e))
 
-    @app.post("/api/v1/crawl/store", tags=["Crawling"])
-    async def crawl_and_store(
+    @app.post("/api/v2/crawl/store", tags=["Crawling V2"])
+    async def crawl_and_store_v2(
         request: CrawlStoreRequest,
         session: Dict = Depends(verify_api_key)
     ):
-        """Crawl a URL and store it permanently"""
+        """V2: Crawl a URL and store it permanently. Uses self-contained toolactions."""
         try:
-            result = await rag_system.crawl_and_store(
+            result = await crawl_operations.crawl_and_store(
+                crawl4ai_url,
                 request.url,
                 retention_policy=request.retention_policy or "permanent",
                 tags=request.tags or ""
@@ -216,17 +311,18 @@ def create_app() -> FastAPI:
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
         except Exception as e:
-            log_error("api_crawl_store", e, request.url)
+            toolactions_storage.log_error("api_crawl_store_v2", e, request.url)
             raise HTTPException(status_code=500, detail=str(e))
 
-    @app.post("/api/v1/crawl/temp", tags=["Crawling"])
-    async def crawl_temp(
+    @app.post("/api/v2/crawl/temp", tags=["Crawling V2"])
+    async def crawl_temp_v2(
         request: CrawlStoreRequest,
         session: Dict = Depends(verify_api_key)
     ):
-        """Crawl a URL and store temporarily (session only)"""
+        """V2: Crawl a URL and store temporarily (session only). Uses self-contained toolactions."""
         try:
-            result = await rag_system.crawl_and_store(
+            result = await crawl_operations.crawl_and_store(
+                crawl4ai_url,
                 request.url,
                 retention_policy="session_only",
                 tags=request.tags or ""
@@ -235,19 +331,20 @@ def create_app() -> FastAPI:
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
         except Exception as e:
-            log_error("api_crawl_temp", e, request.url)
+            toolactions_storage.log_error("api_crawl_temp_v2", e, request.url)
             raise HTTPException(status_code=500, detail=str(e))
 
-    @app.post("/api/v1/crawl/deep/store", tags=["Crawling"])
-    async def deep_crawl_and_store(
+    @app.post("/api/v2/crawl/deep/store", tags=["Crawling V2"])
+    async def deep_crawl_and_store_v2(
         request: DeepCrawlStoreRequest,
         session: Dict = Depends(verify_api_key)
     ):
-        """Deep crawl multiple pages and store all content"""
+        """V2: Deep crawl multiple pages and store all content. Uses self-contained toolactions."""
         try:
             # Run in thread pool to avoid blocking the API
             result = await asyncio.to_thread(
-                rag_system.deep_crawl_and_store,
+                deep_crawl.deep_crawl_and_store,
+                crawl4ai_url,
                 request.url,
                 retention_policy=request.retention_policy or "permanent",
                 tags=request.tags or "",
@@ -261,331 +358,162 @@ def create_app() -> FastAPI:
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
         except Exception as e:
-            log_error("api_deep_crawl", e, request.url)
+            toolactions_storage.log_error("api_deep_crawl_v2", e, request.url)
             raise HTTPException(status_code=500, detail=str(e))
 
     # ========== Search Endpoints ==========
 
-    @app.post("/api/v1/search", tags=["Search"])
-    async def search(
+    @app.post("/api/v2/search", tags=["Search V2"])
+    async def search_v2(
         request: SearchRequest,
         session: Dict = Depends(verify_api_key)
     ):
-        """Simple vector similarity search"""
+        """V2: GraphRAG hybrid vector + graph search. Uses self-contained toolactions via robaigraphrag API."""
         try:
-            result = await rag_system.search_knowledge(
-                query=request.query,
-                limit=request.limit or 5,
-                tags=request.tags
+            result = await search_operations.search(
+                term=request.term,
+                depth=request.depth or "medium",
+                limit=request.limit or 10
             )
             return {"success": True, "data": result, "timestamp": datetime.now().isoformat()}
         except Exception as e:
-            log_error("api_search", e, request.query)
+            toolactions_storage.log_error("api_search_v2", e, request.term)
             raise HTTPException(status_code=500, detail=str(e))
 
-    @app.post("/api/v1/search/kg", tags=["Search"])
-    async def kg_search(
-        request: KGSearchRequest,
+    # ========== Web Search Endpoint (Serper) ==========
+
+    @app.post("/api/v2/web_search", tags=["Search V2"])
+    async def web_search_v2(
+        request: WebSearchRequest,
         session: Dict = Depends(verify_api_key)
     ):
-        """
-        KG Search - Full 5-Phase Knowledge Graph Pipeline:
-
-        Complete comprehensive search using all phases:
-        - Phase 1: GLiNER entity extraction + query embedding
-        - Phase 2: Parallel vector + Neo4j graph search
-        - Phase 3: KG-powered entity expansion (configurable)
-        - Phase 4: Multi-signal ranking (5 signals: vector similarity, graph connectivity, entity density, recency, tag match)
-        - Phase 5: Context extraction and formatted results
-
-        Returns separate RAG and KG result sets with full context.
-        Most comprehensive search for complex queries requiring deep knowledge graph analysis.
-        """
+        """V2: Web search via Serper API (Google Search). Returns titles, URLs, and snippets."""
         try:
-            import asyncio
-            from robaimodeltools.search.search_handler import SearchHandler
-
-            # Parse tags
-            tags_list = None
-            if request.tags:
-                tags_list = [tag.strip() for tag in request.tags.split(',') if tag.strip()]
-
-            # Get KG service URL from environment
-            kg_service_url = os.getenv("KG_SERVICE_URL", "http://localhost:8088")
-
-            # Initialize SearchHandler (5-phase pipeline)
-            handler = SearchHandler(
-                db_manager=GLOBAL_DB,
-                kg_service_url=kg_service_url
-            )
-
-            # Execute 5-phase search
-            result = await asyncio.to_thread(
-                handler.search_separate,
+            result = await serper_search.serper_search(
                 query=request.query,
-                rag_limit=request.rag_limit or 5,
-                kg_limit=request.kg_limit or 10,
-                tags=tags_list,
-                enable_expansion=request.enable_expansion if hasattr(request, 'enable_expansion') else True,
-                include_context=request.include_context if hasattr(request, 'include_context') else True
+                num_results=request.num_results or 10,
+                max_chars_per_result=request.max_chars_per_result or 500
             )
-
-            return {"success": True, "data": result, "timestamp": datetime.now().isoformat()}
+            return result
         except Exception as e:
-            log_error("api_kg_search", e, request.query)
-            raise HTTPException(status_code=500, detail=str(e))
-
-    @app.post("/api/v1/search/enhanced", tags=["Search"])
-    async def enhanced_search(
-        request: EnhancedSearchRequest,
-        session: Dict = Depends(verify_api_key)
-    ):
-        """
-        Enhanced Search - Optimized KG Search with Focused Results:
-
-        Returns focused, high-quality results optimized for manageable data transfer:
-        - 1 top RAG vector result (100K character limit)
-        - 10 KG chunks with targeted entity mentions
-        - 1 top KG document (100K character limit, guaranteed different URL from RAG)
-
-        Pipeline:
-        - GLiNER entity extraction
-        - Parallel vector search + Neo4j graph search (fetches 250 chunks)
-        - Chunk aggregation to documents (up to 20 documents)
-        - Entity density ranking
-        - Top result selection
-
-        Data Size: ~200-250KB (90% smaller than full pipeline)
-        Best for: Getting comprehensive context with controlled data size
-        """
-        try:
-            import asyncio
-            from robaimodeltools.search.enhanced_search import get_enhanced_search_orchestrator
-
-            # Parse tags
-            tags_list = None
-            if request.tags:
-                tags_list = [tag.strip() for tag in request.tags.split(',') if tag.strip()]
-
-            # Get KG service URL from environment
-            kg_service_url = os.getenv("KG_SERVICE_URL", "http://localhost:8088")
-
-            # Initialize EnhancedSearchOrchestrator
-            orchestrator = get_enhanced_search_orchestrator(
-                db_manager=GLOBAL_DB,
-                kg_service_url=kg_service_url
-            )
-
-            # Execute enhanced search (returns: rag_result, kg_chunks, kg_document)
-            result = await asyncio.to_thread(
-                orchestrator.search,
-                query=request.query,
-                rag_limit=request.rag_limit or 1,
-                kg_limit=request.kg_limit or 10,
-                tags=tags_list
-            )
-
-            return {"success": True, "data": result, "timestamp": datetime.now().isoformat()}
-        except Exception as e:
-            log_error("api_enhanced_search", e, request.query)
-            raise HTTPException(status_code=500, detail=str(e))
-
-    # ========== Memory Management Endpoints ==========
-
-    @app.get("/api/v1/memory", tags=["Memory"])
-    async def list_memory(
-        retention_policy: str = None,
-        limit: int = 100,
-        session: Dict = Depends(verify_api_key)
-    ):
-        """List all stored content"""
-        try:
-            results = GLOBAL_DB.list_content(retention_policy=retention_policy, limit=limit)
-            return {"success": True, "content": results, "timestamp": datetime.now().isoformat()}
-        except Exception as e:
-            log_error("api_list_memory", e)
-            raise HTTPException(status_code=500, detail=str(e))
-
-    @app.delete("/api/v1/memory", tags=["Memory"])
-    async def forget_url(
-        url: str,
-        session: Dict = Depends(verify_api_key)
-    ):
-        """Remove specific URL from memory"""
-        try:
-            GLOBAL_DB.forget(url)
-            return {"success": True, "message": f"Removed {url}", "timestamp": datetime.now().isoformat()}
-        except Exception as e:
-            log_error("api_forget_url", e, url)
-            raise HTTPException(status_code=500, detail=str(e))
-
-    @app.delete("/api/v1/memory/temp", tags=["Memory"])
-    async def clear_temp_memory(session: Dict = Depends(verify_api_key)):
-        """Clear all temporary content"""
-        try:
-            GLOBAL_DB.clear_temp()
-            return {"success": True, "message": "Cleared temporary content", "timestamp": datetime.now().isoformat()}
-        except Exception as e:
-            log_error("api_clear_temp", e)
+            toolactions_storage.log_error("api_web_search_v2", e, request.query)
             raise HTTPException(status_code=500, detail=str(e))
 
     # ========== Statistics Endpoints ==========
 
-    @app.get("/api/v1/stats", tags=["Statistics"])
-    @app.get("/api/v1/db/stats", tags=["Statistics"])
-    async def get_stats(session: Dict = Depends(verify_api_key)):
-        """Get database statistics"""
+    @app.get("/api/v2/stats", tags=["Statistics V2"])
+    @app.get("/api/v2/db/stats", tags=["Statistics V2"])
+    async def get_stats_v2(session: Dict = Depends(verify_api_key)):
+        """V2: Get database statistics. Uses self-contained toolactions."""
         try:
-            stats = GLOBAL_DB.get_database_stats()
+            stats = await stats_operations.get_database_stats()
             return {"success": True, "stats": stats, "timestamp": datetime.now().isoformat()}
         except Exception as e:
-            log_error("api_get_stats", e)
+            toolactions_storage.log_error("api_get_stats_v2", e)
             raise HTTPException(status_code=500, detail=str(e))
 
-    # ========== Domain Blocking Endpoints ==========
+    # ========== System Health Endpoint V2 ==========
 
-    @app.get("/api/v1/blocked-domains", tags=["Domain Management"])
-    async def list_blocked_domains(session: Dict = Depends(verify_api_key)):
-        """List all blocked domain patterns"""
+    @app.get("/api/v2/health/containers", tags=["System Health V2"])
+    async def get_container_health(session: Dict = Depends(verify_api_key)):
+        """V2: Get health status of all Docker containers."""
+        import subprocess
         try:
-            from robaimodeltools.operations.domain_management import list_blocked_domains as get_blocked
-            domains = get_blocked()
-            return {"success": True, "blocked_domains": domains, "timestamp": datetime.now().isoformat()}
-        except Exception as e:
-            log_error("api_list_blocked", e)
-            raise HTTPException(status_code=500, detail=str(e))
+            # Run docker ps to get all containers with their status
+            result = subprocess.run(
+                ["docker", "ps", "-a", "--format", "{{.Names}}\t{{.Status}}\t{{.State}}"],
+                capture_output=True,
+                text=True,
+                timeout=10
+            )
 
-    @app.post("/api/v1/blocked-domains", tags=["Domain Management"])
-    async def add_blocked_domain(
-        request: BlockedDomainRequest,
-        session: Dict = Depends(verify_api_key)
-    ):
-        """Add a domain pattern to blocklist"""
-        try:
-            from robaimodeltools.operations.domain_management import add_blocked_domain as add_blocked
-            add_blocked(request.pattern, request.keyword)
-            return {"success": True, "message": f"Added {request.pattern}", "timestamp": datetime.now().isoformat()}
-        except Exception as e:
-            log_error("api_add_blocked", e, request.pattern)
-            raise HTTPException(status_code=500, detail=str(e))
+            containers = {}
+            if result.returncode == 0 and result.stdout.strip():
+                for line in result.stdout.strip().split("\n"):
+                    parts = line.split("\t")
+                    if len(parts) >= 3:
+                        name, status, state = parts[0], parts[1], parts[2]
+                        containers[name] = {
+                            "status": status,
+                            "state": state
+                        }
 
-    @app.delete("/api/v1/blocked-domains", tags=["Domain Management"])
-    async def remove_blocked_domain(
-        pattern: str,
-        keyword: str,
-        session: Dict = Depends(verify_api_key)
-    ):
-        """Remove a domain pattern from blocklist"""
-        try:
-            from robaimodeltools.operations.domain_management import remove_blocked_domain as remove_blocked
-            remove_blocked(pattern, keyword)
-            return {"success": True, "message": f"Removed {pattern}", "timestamp": datetime.now().isoformat()}
+            return {
+                "success": True,
+                "containers": containers,
+                "total": len(containers),
+                "timestamp": datetime.now().isoformat()
+            }
+        except subprocess.TimeoutExpired:
+            raise HTTPException(status_code=504, detail="Docker command timed out")
+        except FileNotFoundError:
+            raise HTTPException(status_code=500, detail="Docker not found on system")
         except Exception as e:
-            log_error("api_remove_blocked", e, pattern)
+            toolactions_storage.log_error("api_get_container_health", e)
             raise HTTPException(status_code=500, detail=str(e))
 
     # ========== Help Endpoint ==========
 
-    @app.get("/api/v1/help", tags=["Help"])
+    @app.get("/api/v2/help", tags=["Help"])
     async def get_help(session: Dict = Depends(verify_api_key)):
-        """Get help documentation for all tools (requires bearer token authentication)"""
+        """Get help documentation for all v2 tools"""
         help_data = {
             "success": True,
             "tools": [
                 {
                     "name": "crawl_url",
+                    "endpoint": "POST /api/v2/crawl",
                     "example": "Crawl https://github.com/torvalds/linux without storing",
-                    "parameters": "url: string"
+                    "parameters": "url: string, max_chars?: number (5000-25000)"
                 },
                 {
                     "name": "crawl_and_store",
+                    "endpoint": "POST /api/v2/crawl/store",
                     "example": "Crawl and permanently store https://github.com/anthropics/anthropic-sdk-python",
                     "parameters": "url: string, tags?: string, retention_policy?: string"
                 },
                 {
                     "name": "crawl_temp",
+                    "endpoint": "POST /api/v2/crawl/temp",
                     "example": "Crawl and temporarily store https://news.ycombinator.com",
                     "parameters": "url: string, tags?: string"
                 },
                 {
                     "name": "deep_crawl_and_store",
+                    "endpoint": "POST /api/v2/crawl/deep/store",
                     "example": "Deep crawl https://docs.python.org starting from main page",
-                    "parameters": "url: string, max_depth?: number (1-5, default 2), max_pages?: number (1-250, default 10), retention_policy?: string, tags?: string, include_external?: boolean, score_threshold?: number (0.0-1.0), timeout?: number (60-1800)"
+                    "parameters": "url: string, max_depth?: number (1-5), max_pages?: number (1-250)"
                 },
                 {
-                    "name": "simple_search",
-                    "example": "Simple vector similarity search for 'FastAPI authentication' without KG enhancement",
-                    "parameters": "query: string, limit?: number (default 10, max 1000), tags?: string (comma-separated), min_similarity?: number (default 0.2), max_content_length?: number (default 10000)"
-                },
-                {
-                    "name": "kg_search",
-                    "example": "Full 5-phase KG pipeline: 'React performance optimization' - comprehensive entity extraction, graph traversal, and multi-signal ranking",
-                    "parameters": "query: string, rag_limit?: number (default 5), kg_limit?: number (default 10), tags?: string, enable_expansion?: boolean (default true), include_context?: boolean (default true)",
-                    "description": "Complete 5-phase knowledge graph search: GLiNER entity extraction, parallel vector+graph search (Neo4j), KG entity expansion, multi-signal ranking (5 signals: vector similarity, graph connectivity, entity density, recency, tag match), context extraction. Most comprehensive search for complex queries requiring deep knowledge graph analysis."
-                },
-                {
-                    "name": "enhanced_search",
-                    "example": "Optimized KG search for 'FastAPI async patterns' - Returns 1 top RAG result + 10 entity-rich chunks + 1 top KG document",
-                    "parameters": "query: string, rag_limit?: number (default 1), kg_limit?: number (default 10), tags?: string",
-                    "description": "Optimized search returning focused results: 1 top RAG vector result (100K char limit), 10 KG chunks (targeted entity mentions), 1 top KG document (100K char limit, different URL from RAG). Fetches 250 chunks from KG service, aggregates to 20 documents, returns top-ranked results. Best for getting comprehensive context with manageable data size (~200-250KB vs 1-4MB)."
-                },
-                {
-                    "name": "list_memory",
-                    "example": "List all stored pages or filter by retention policy",
-                    "parameters": "filter?: string (permanent|session_only|30_days), limit?: number (default 100, max 1000)"
+                    "name": "search",
+                    "endpoint": "POST /api/v2/search",
+                    "example": "GraphRAG hybrid search for 'FastAPI authentication'",
+                    "parameters": "term: string, depth?: string (low|medium|high), limit?: number"
                 },
                 {
                     "name": "get_database_stats",
-                    "example": "Get database statistics including record counts and storage size",
+                    "endpoint": "GET /api/v2/stats",
+                    "example": "Get database statistics",
                     "parameters": "none"
                 },
                 {
-                    "name": "add_blocked_domain",
-                    "example": "Block all .ru domains or URLs containing 'spam'",
-                    "parameters": "pattern: string (e.g., *.ru, *.cn, *spam*, example.com), description?: string"
-                },
-                {
-                    "name": "remove_blocked_domain",
-                    "example": "Unblock a previously blocked domain pattern",
-                    "parameters": "pattern: string, keyword: string (authorization)"
-                },
-                {
-                    "name": "list_blocked_domains",
-                    "example": "Show all currently blocked domain patterns",
-                    "parameters": "none"
-                },
-                {
-                    "name": "forget_url",
-                    "example": "Remove specific URL from knowledge base",
-                    "parameters": "url: string"
-                },
-                {
-                    "name": "clear_temp_memory",
-                    "example": "Clear all temporary/session-only content",
+                    "name": "container_health",
+                    "endpoint": "GET /api/v2/health/containers",
+                    "example": "Get Docker container health status",
                     "parameters": "none"
                 }
             ],
             "api_info": {
-                "base_url": "/api/v1",
+                "base_url": "/api/v2",
                 "authentication": "Bearer token required in Authorization header",
                 "public_endpoints": {
                     "/health": {
                         "method": "GET",
-                        "description": "System health check (no auth required)",
-                        "returns": "Health status of all services"
+                        "description": "System health check (no auth required)"
                     },
-                    "/api/v1/help": {
+                    "/api/v1/tools/list": {
                         "method": "GET",
-                        "description": "Get tool list for LLM providers (no auth required)",
-                        "returns": "Structured tool list with examples and parameters"
-                    }
-                },
-                "formats": {
-                    "retention_policy": ["permanent", "session_only", "30_days"],
-                    "http_methods": {
-                        "GET": ["/status", "/memory", "/stats", "/db/stats", "/blocked-domains", "/help"],
-                        "POST": ["/crawl", "/crawl/store", "/crawl/temp", "/crawl/deep/store", "/search", "/search/simple", "/search/kg", "/blocked-domains"],
-                        "DELETE": ["/memory", "/memory/temp", "/blocked-domains"]
+                        "description": "Get LLM tools in OpenAI format (no auth required)"
                     }
                 }
             },

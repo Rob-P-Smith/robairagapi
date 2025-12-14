@@ -17,7 +17,6 @@ class Config:
 
     # Authentication
     LOCAL_API_KEY = os.getenv("OPENAI_API_KEY")
-    REMOTE_API_KEY_2 = os.getenv("OPENAI_API_KEY_2")
 
     # Rate Limiting
     RATE_LIMIT_PER_MINUTE = int(os.getenv("RATE_LIMIT_PER_MINUTE", "60"))
@@ -54,8 +53,8 @@ class Config:
         """Validate required configuration"""
         errors = []
 
-        if not cls.LOCAL_API_KEY and not cls.REMOTE_API_KEY_2:
-            errors.append("At least one API key must be configured (LOCAL_API_KEY or REMOTE_API_KEY_2)")
+        if not cls.LOCAL_API_KEY:
+            errors.append("LOCAL_API_KEY (OPENAI_API_KEY) must be configured")
 
         if errors:
             raise ValueError(f"Configuration errors: {', '.join(errors)}")

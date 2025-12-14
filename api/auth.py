@@ -168,7 +168,6 @@ def verify_api_key(credentials: HTTPAuthorizationCredentials = Security(security
     # Load all valid API keys from environment
     valid_keys = [
         os.getenv("OPENAI_API_KEY"),
-        os.getenv("OPENAI_API_KEY_2"),
     ]
     # Filter out None values and normalize them
     valid_keys = [key.strip() for key in valid_keys if key]
