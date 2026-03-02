@@ -1,1438 +1,528 @@
 # robairagapi
 
-**Lightweight FastAPI REST API Bridge for RobAI RAG System**
+**RobAI RAG API Bridge** – A production‑grade FastAPI service that exposes the full capabilities of the RobAI Retrieval‑Augmented Generation (RAG) stack via a clean, versioned HTTP/JSON interface.  
+It is deliberately **self‑contained** (no MCP server) and is built to be consumed by **AI agents**, external tools (e.g., OpenWebUI), and human developers alike.
 
-A production-ready REST API that provides HTTP/JSON access to the RobAI Retrieval-Augmented Generation (RAG) system. Enables external tools like OpenWebUI to perform web crawling, semantic search, and knowledge management through a clean RESTful interface.
+---  
 
 ## Table of Contents
+1. [Overview](#overview)  
+2. [Architecture Diagram & Data Flow](#architecture-diagram--data-flow)  
+3. [Key Concepts & Terminology](#key-concepts--terminology)  
+4. [Installation & Quick‑Start](#installation--quick‑start)  
+5. [Configuration (Environment Variables)](#configuration-environment-variables)  
+6. [Authentication & Security Model](#authentication--security-model)  
+7. [Rate Limiting & Session Management](#rate-limiting--session-management)  
+8. [API Reference (V2 Endpoints)](#api-reference-v2-endpoints)  
+   - [Health & Status](#health--status)  
+   - [Crawling](#crawling)  
+   - [Search](#search)  
+   - [Web‑Search (Serper)](#web‑search-serper)  
+   - [Memory Management](#memory-management)  
+   - [Domain Management](#domain-management)  
+   - [Statistics & Container Health](#statistics--container-health)  
+   - [Help / Tool Discovery](#help--tool-discovery)  
+   - [OpenAPI Customisation](#openapi-customisation)  
+9. [Internal Module Walk‑through](#internal-module-walk‑through)  
+10. [Detailed Toolactions Overview](#detailed-toolactions-overview)  
+11. [Validation Layer Details](#validation-layer-details)  
+12. [Security Middleware Deep Dive](#security-middleware-deep-dive)  
+13. [Network Utilities](#network-utilities)  
+14. [Error Handling Strategy](#error-handling-strategy)  
+15. [Logging & Observability](#logging--observability)  
+16. [Docker Image & Deployment](#docker-image--deployment)  
+17. [Performance Considerations](#performance-considerations)  
+18. [Development Workflow & Testing](#development-workflow--testing)  
+19. [Extending the API](#extending-the-api)  
+20. [CI/CD Pipeline (Suggested)](#cicd-pipeline-suggested)  
+21. [Contributing Guidelines](#contributing-guidelines)  
+22. [License & Contact](#license--contact)  
 
-- [Overview](#overview)
-- [Key Features](#key-features)
-- [Architecture](#architecture)
-- [API Endpoints](#api-endpoints)
-  - [Health & Status](#health--status)
-  - [Crawling](#crawling)
-  - [Search](#search)
-  - [Memory Management](#memory-management)
-  - [Statistics](#statistics)
-  - [Domain Management](#domain-management)
-  - [Help](#help)
-- [Search Modes](#search-modes)
-- [Authentication & Security](#authentication--security)
-- [Configuration](#configuration)
-- [Installation](#installation)
-- [Usage Examples](#usage-examples)
-- [Docker Deployment](#docker-deployment)
-- [Validation & Error Handling](#validation--error-handling)
-- [Integration](#integration)
-- [Performance](#performance)
-- [Statistics](#statistics-1)
+---  
 
 ## Overview
+`robairagapi` is a **REST façade** for the core `robaimodeltools` library (the shared RAG engine). It abstracts away direct Python imports and lets callers:
 
-**robairagapi** is a lightweight (~50MB) FastAPI-based REST API that bridges HTTP clients to the RobAI RAG infrastructure. Unlike traditional MCP-based bridges, it uses direct Python imports from [robaimodeltools](../robaimodeltools) for minimal overhead and maximum performance.
+* **Crawl** arbitrary URLs (single‑page or deep recursive crawl) and optionally store the extracted content.  
+* **Search** using three distinct modes:  
+  1. **Simple Vector** – fast similarity lookup.  
+  2. **KG‑Hybrid** – vector + knowledge‑graph enrichment.  
+  3. **Enhanced 5‑phase** – full pipeline with entity expansion, multi‑signal ranking, and markdown rendering.  
+* **Manage Memory** – list, delete, or clear stored content with retention‑policy granularity.  
+* **Control Security** – add/remove blocked‑domain patterns, enforce URL validation, and apply rate limits.  
+* **Monitor** – health checks, container status, and database statistics.
 
-### What It Does
+All endpoints (except `/health` and `/api/v1/tools/list`) require **Bearer token authentication**.
 
-- **Web Crawling**: Extract and store content from URLs (single or deep crawl)
-- **Semantic Search**: Vector similarity search with optional knowledge graph enhancement
-- **Memory Management**: Store, retrieve, and organize crawled content
-- **Domain Blocking**: Pattern-based URL blocking for security
-- **Knowledge Graph Integration**: Entity extraction and relationship-based search
+---  
 
-### What Makes It Different
-
-- **Lightweight**: ~50MB Docker image vs ~600MB for full stack alternatives
-- **Direct Integration**: No external MCP dependency, uses robaimodeltools directly
-- **Multi-Layer Security**: 5-layer validation with defense-in-depth architecture
-- **Production-Ready**: Bearer token auth, rate limiting, session management
-- **OpenAPI Compatible**: Auto-generated Swagger docs at `/docs`
-
-## Key Features
-
-### API Capabilities
-
-- **23 REST Endpoints** across 6 categories
-- **3 Search Modes**: Simple (vector), KG-enhanced (hybrid), Full pipeline (5-phase)
-- **3 Retention Policies**: Permanent, session-only, 30-day
-- **Bearer Token Authentication** with rate limiting (60 req/min default)
-- **Session Management**: 24-hour sessions with auto-cleanup
-- **CORS Support**: Configurable cross-origin requests
-
-### Search Features
-
-- **Simple Search**: Fast vector similarity (100-500ms)
-- **KG Search**: Hybrid vector + knowledge graph (500-2000ms)
-- **Enhanced Search**: Full 5-phase pipeline with entity expansion (1-3s)
-- **Tag Filtering**: Organize and filter by custom tags
-- **Entity Extraction**: GLiNER-based entity recognition
-- **Multi-Signal Ranking**: 5 signals (similarity, connectivity, density, recency, tags)
-
-### Security Features
-
-- **URL Validation**: Blocks localhost, private IPs, cloud metadata endpoints
-- **SQL Injection Prevention**: Multi-layer SQL keyword detection
-- **Rate Limiting**: Configurable per-API-key sliding window
-- **Input Sanitization**: Length limits, range validation, type checking
-- **Domain Blocking**: Wildcard pattern matching for malicious domains
-
-## Architecture
-
-### System Design
-
+## Architecture Diagram & Data Flow
 ```
-External Clients (OpenWebUI, curl, scripts)
-    ↓ HTTP REST (port 8080)
-┌─────────────────────────────────────────┐
-│  robairagapi (FastAPI Bridge)           │
-│  ├─ Authentication & Rate Limiting      │
-│  ├─ Input Validation (5 layers)         │
-│  ├─ REST Endpoints (23 endpoints)       │
-│  └─ Response Formatting                 │
-└────────────┬────────────────────────────┘
-             │ Direct Python Imports
-             ↓
-┌─────────────────────────────────────────┐
-│  robaimodeltools (Shared Library)       │
-│  ├─ Crawl4AIRAG (crawler)               │
-│  ├─ SearchHandler (KG search)           │
-│  ├─ GLOBAL_DB (storage)                 │
-│  └─ Domain Management                   │
-└────────────┬────────────────────────────┘
-             │
-             ├──→ Crawl4AI (port 11235)
-             ├──→ SQLite Database (crawl4ai_rag.db)
-             ├──→ KG Service (port 8088)
-             └──→ Neo4j Graph DB (port 7687)
+┌─────────────────────┐
+│  External Clients   │   (OpenWebUI, curl, python scripts, AI agents)
+└─────────┬───────────┘
+          │ HTTP/JSON
+          ▼
+┌─────────────────────┐
+│   robairagapi       │  FastAPI server (this repo)
+│  ├─ config.py       │  → env‑var based configuration
+│  ├─ auth.py         │  → token validation, rate limiting, sessions
+│  ├─ models.py       │  → request/response validation (Pydantic)
+│  ├─ security.py     │  → security middleware (IP/MAC, header checks)
+│  ├─ network_utils.py│  → MAC lookup & subnet helpers
+│  ├─ validation.py   │  → URL sanitisation, string‑length checks
+│  ├─ tool_discovery.py│→ background client pulling LLM tool definitions
+│  └─ toolactions/    │  → self‑contained crawling/search utilities
+│      ├─ data/       │     • storage.py (error logging)
+│      │   ├─ content_cleaner.py
+│      │   └─ dbdefense.py
+│      └─ operations/  │     • crawl_operations.py
+│          │          │     • deep_crawl.py
+│          │          │     • search_operations.py
+│          │          │     • serper_search.py
+│          │          │     • stats_operations.py
+│          │          │     • validation.py
+│          └─ utilities/│     • blockeddomains.py
+└───────┬─────────────┘
+        │ Direct imports
+        ▼
+┌─────────────────────┐
+│   robaimodeltools  │   (shared RAG core)
+│   • Crawl4AIRAG    │   → external Crawl4AI service (http://localhost:11235)
+│   • GLOBAL_DB     │   → SQLite DB (`crawl4ai_rag.db`)
+│   • SearchHandler │   → vector store + Neo4j KG
+└─────────────────────┘
 ```
-
-### Data Flow
-
-```
-1. CLIENT REQUEST (HTTP)
-   ↓
-2. FASTAPI ENDPOINT
-   ├─ HTTP parsing
-   ├─ Pydantic validation (Layer 1)
-   └─ Bearer token authentication
-   ↓
-3. RATE LIMITING CHECK
-   ├─ Per-API-key sliding 60-second window
-   └─ Default: 60 requests/minute
-   ↓
-4. OPERATION EXECUTION
-   ├─ Crawling: URL → Crawl4AI → SQLite storage
-   ├─ Search: Query → Vector DB → Optional KG expansion
-   ├─ Memory: CRUD operations on stored content
-   └─ Domain Management: Block/unblock patterns
-   ↓
-5. VALIDATION (Layers 2-5)
-   ├─ Input validation (URL security, SQL injection)
-   ├─ Parameter range checking
-   ├─ Operation validation
-   └─ Response format validation
-   ↓
-6. RESPONSE GENERATION
-   └─ JSON serialization with timestamp
-```
-
-### Directory Structure
-
-```
-robairagapi/
-├── README.md                 # This file
-├── QUICKSTART.md             # 5-minute quickstart guide
-├── main.py                   # Entry point (Uvicorn launcher)
-├── config.py                 # Configuration management
-├── requirements.txt          # Python dependencies (7 packages)
-├── Dockerfile                # Alpine-based container
-├── docker-compose.yml        # Service orchestration
-├── .env.example             # Configuration template
-└── api/
-    ├── __init__.py          # Package marker
-    ├── server.py            # FastAPI app & endpoints (525 lines)
-    ├── models.py            # Pydantic models (170 lines)
-    ├── auth.py              # Authentication & rate limiting (198 lines)
-    └── validation.py        # Input validation (221 lines)
-```
-
-## API Endpoints
-
-### Health & Status
-
-#### GET /health
-
-Health check endpoint (no authentication required).
-
-**Response:**
-```json
-{
-  "status": "healthy",
-  "timestamp": "2024-01-15T10:30:45.123456",
-  "mcp_connected": true,
-  "version": "1.0.0"
-}
-```
-
-**Use Case:** Service monitoring, load balancer health checks
-
-#### GET /api/v1/status
-
-Detailed system status (authentication required).
-
-**Response:**
-```json
-{
-  "api_status": "running",
-  "mcp_status": "direct",
-  "timestamp": "2024-01-15T10:30:45.123456",
-  "components": {
-    "crawl4ai_url": "http://localhost:11235",
-    "mode": "direct"
-  }
-}
-```
-
-**Use Case:** Operational monitoring, debugging
-
-### Crawling
-
-#### POST /api/v1/crawl
-
-Crawl URL without storing (temporary extraction).
-
-**Request:**
-```json
-{
-  "url": "https://example.com/article"
-}
-```
-
-**Response:**
-```json
-{
-  "success": true,
-  "data": {
-    "url": "https://example.com/article",
-    "title": "Article Title",
-    "content": "Extracted text content...",
-    "markdown": "# Article Title\n\nMarkdown formatted...",
-    "status": "success"
-  },
-  "timestamp": "2024-01-15T10:30:45.123456"
-}
-```
-
-**Validation:**
-- URL must be HTTP/HTTPS
-- Not localhost/private IPs/metadata endpoints
-- Valid hostname required
-
-**Use Case:** Preview content before storing, one-time extraction
-
-#### POST /api/v1/crawl/store
-
-Crawl and permanently store URL.
-
-**Request:**
-```json
-{
-  "url": "https://example.com/article",
-  "tags": "python,tutorial,documentation",
-  "retention_policy": "permanent"
-}
-```
-
-**Parameters:**
-- `url` (required): URL to crawl and store
-- `tags` (optional): Comma-separated tags for organization
-- `retention_policy` (optional): `permanent` | `session_only` | `30_days` (default: `permanent`)
-
-**Response:** Same as `/crawl` plus:
-```json
-{
-  "data": {
-    "content_id": 123,
-    "stored": true,
-    "retention_policy": "permanent",
-    "tags": ["python", "tutorial", "documentation"],
-    ...
-  }
-}
-```
-
-**Side Effects:**
-- Creates embeddings (384-dimensional vectors)
-- Queues for knowledge graph processing
-- Stores in SQLite database
-
-**Use Case:** Build knowledge base, permanent content storage
-
-#### POST /api/v1/crawl/temp
-
-Crawl and store temporarily (session-only).
-
-**Request:** Same as `/crawl/store`
-
-**Difference:** Content deleted when user's session expires (24 hours)
-
-**Use Case:** Temporary research, disposable content
-
-#### POST /api/v1/crawl/deep/store
-
-Deep crawl multiple pages from a domain (recursive BFS).
-
-**Request:**
-```json
-{
-  "url": "https://docs.python.org",
-  "max_depth": 2,
-  "max_pages": 10,
-  "include_external": false,
-  "score_threshold": 0.0,
-  "timeout": 600,
-  "tags": "python,docs",
-  "retention_policy": "permanent"
-}
-```
-
-**Parameters:**
-- `url` (required): Root URL to start crawling
-- `max_depth` (1-5, default 2): Maximum crawl depth
-- `max_pages` (1-250, default 10): Maximum pages to crawl
-- `include_external` (default false): Follow external domain links
-- `score_threshold` (0.0-1.0, default 0.0): URL relevance filter
-- `timeout` (60-1800 seconds): Total operation timeout
-- `tags`, `retention_policy`: Same as `/crawl/store`
-
-**Response:**
-```json
-{
-  "success": true,
-  "data": {
-    "root_url": "https://docs.python.org",
-    "pages_crawled": 8,
-    "urls": [
-      "https://docs.python.org/3/tutorial/",
-      ...
-    ],
-    "content_ids": [123, 124, 125, ...],
-    "timestamp": "2024-01-15T10:30:45.123456"
-  }
-}
-```
-
-**Execution:** Runs in thread pool (async, non-blocking)
-
-**Use Case:** Crawl documentation sites, wikis, knowledge bases
-
-### Search
-
-#### POST /api/v1/search (or /api/v1/search/simple)
-
-Simple vector similarity search (fast, no KG).
-
-**Request:**
-```json
-{
-  "query": "FastAPI authentication",
-  "limit": 5,
-  "tags": "python,web"
-}
-```
-
-**Parameters:**
-- `query` (required, max 500 chars): Search query
-- `limit` (1-1000, default 10): Number of results
-- `tags` (optional): Filter by tags (ANY match)
-
-**Response:**
-```json
-{
-  "success": true,
-  "data": {
-    "query": "FastAPI authentication",
-    "results": [
-      {
-        "content_id": 123,
-        "url": "https://example.com/fastapi-auth",
-        "title": "FastAPI Authentication Guide",
-        "chunk_text": "FastAPI uses Bearer tokens...",
-        "similarity_score": 0.95,
-        "tags": ["python", "web"]
-      }
-    ],
-    "count": 5
-  },
-  "timestamp": "2024-01-15T10:30:45.123456"
-}
-```
-
-**Performance:** ~100-500ms
-
-**Use Case:** Fast lookups, simple queries
-
-#### POST /api/v1/search/kg
-
-Hybrid search (vector + knowledge graph).
-
-**Request:**
-```json
-{
-  "query": "FastAPI async patterns",
-  "rag_limit": 5,
-  "kg_limit": 10,
-  "tags": "python",
-  "enable_expansion": true,
-  "include_context": true
-}
-```
-
-**Parameters:**
-- `query` (required): Search query
-- `rag_limit` (1-100, default 5): Vector search results
-- `kg_limit` (1-100, default 10): Graph search results
-- `tags` (optional): Tag filter
-- `enable_expansion` (default true): Entity expansion via KG
-- `include_context` (default true): Include surrounding text
-
-**Response:**
-```json
-{
-  "success": true,
-  "data": {
-    "query": "FastAPI async patterns",
-    "rag_results": [
-      {
-        "content_id": 123,
-        "url": "...",
-        "similarity_score": 0.95,
-        ...
-      }
-    ],
-    "kg_results": [
-      {
-        "entity": "asyncio",
-        "type": "Library",
-        "context": "Python's asyncio is used for async programming",
-        "confidence": 0.87,
-        "referenced_chunks": [3, 5, 7]
-      }
-    ],
-    "rag_count": 5,
-    "kg_count": 10
-  }
-}
-```
-
-**Features:**
-- Entity expansion: Finds related entities automatically
-- Context extraction: Returns surrounding text
-- Multi-signal ranking: Combines similarity + graph connectivity
-
-**Performance:** ~500-2000ms
-
-**Use Case:** Complex queries, entity-focused research
-
-#### POST /api/v1/search/enhanced
-
-Full 5-phase search pipeline (most comprehensive).
-
-**Request:**
-```json
-{
-  "query": "React performance optimization techniques",
-  "tags": "javascript,react"
-}
-```
-
-**FIXED Configuration** (not customizable):
-- RAG results: Always 3 with FULL markdown content
-- KG results: Always 5 with referenced chunks
-- Entity expansion: Always enabled
-- Context extraction: Always enabled
-
-**Response:**
-```json
-{
-  "success": true,
-  "data": {
-    "query": "React performance optimization techniques",
-    "rag_results": [
-      {
-        "content_id": 123,
-        "url": "...",
-        "title": "...",
-        "markdown": "# Full markdown content with all formatting...",
-        "similarity_score": 0.95
-      }
-    ],
-    "kg_results": [
-      {
-        "entity": "Virtual DOM",
-        "type": "Concept",
-        "description": "...",
-        "referenced_chunks": [1, 3, 5]
-      }
-    ],
-    "processing_stages": {
-      "entity_extraction": "completed",
-      "vector_search": "completed",
-      "graph_search": "completed",
-      "ranking": "completed"
-    }
-  }
-}
-```
-
-**5-Phase Pipeline:**
-1. **Phase 1**: GLiNER entity extraction + query embedding
-2. **Phase 2**: Parallel vector + Neo4j graph search (up to 100 entities)
-3. **Phase 3**: KG-powered entity expansion
-4. **Phase 4**: Multi-signal ranking (5 signals)
-5. **Phase 5**: Format results with full markdown
-
-**Performance:** ~1-3 seconds
-
-**Use Case:** Deep research, complex topics, comprehensive answers
-
-### Memory Management
-
-#### GET /api/v1/memory
-
-List all stored content with optional filtering.
-
-**Query Parameters:**
-- `retention_policy` (optional): Filter by `permanent` | `session_only` | `30_days`
-- `limit` (1-1000, default 100): Maximum results
-
-**Response:**
-```json
-{
-  "success": true,
-  "content": [
-    {
-      "content_id": 123,
-      "url": "https://example.com/article",
-      "title": "Article Title",
-      "tags": ["python", "tutorial"],
-      "retention_policy": "permanent",
-      "created_at": "2024-01-15T10:30:45.123456",
-      "updated_at": "2024-01-15T10:35:20.654321",
-      "word_count": 5000,
-      "chunk_count": 5
-    }
-  ],
-  "count": 5,
-  "timestamp": "2024-01-15T10:30:45.123456"
-}
-```
-
-**Use Case:** Audit storage, view knowledge base, cleanup planning
-
-#### DELETE /api/v1/memory
-
-Remove specific URL from memory.
-
-**Query Parameters:**
-- `url` (required): URL to forget
-
-**Response:**
-```json
-{
-  "success": true,
-  "message": "Removed https://example.com/article",
-  "timestamp": "2024-01-15T10:30:45.123456"
-}
-```
-
-**Side Effects:** Deletes content, vectors, chunks, and KG nodes
-
-**Use Case:** Remove outdated or sensitive content
-
-#### DELETE /api/v1/memory/temp
-
-Clear all session-only (temporary) content.
-
-**Response:**
-```json
-{
-  "success": true,
-  "message": "Cleared temporary content",
-  "timestamp": "2024-01-15T10:30:45.123456"
-}
-```
-
-**Use Case:** End-of-session cleanup, free storage
-
-### Statistics
-
-#### GET /api/v1/stats (or /api/v1/db/stats)
-
-Get database statistics and usage metrics.
-
-**Response:**
-```json
-{
-  "success": true,
-  "stats": {
-    "total_content": 42,
-    "total_chunks": 512,
-    "total_vectors": 512,
-    "database_size_bytes": 52428800,
-    "permanent_content": 35,
-    "session_content": 5,
-    "thirty_day_content": 2,
-    "avg_content_size": 1243,
-    "avg_chunk_size": 987,
-    "oldest_content": "2024-01-01T10:30:45.123456",
-    "newest_content": "2024-01-15T10:30:45.123456",
-    "kg_processed": 38,
-    "kg_pending": 4
-  },
-  "timestamp": "2024-01-15T10:30:45.123456"
-}
-```
-
-**Use Case:** Monitoring, capacity planning, debugging
-
-### Domain Management
-
-#### GET /api/v1/blocked-domains
-
-List all blocked domain patterns.
-
-**Response:**
-```json
-{
-  "success": true,
-  "blocked_domains": [
-    {
-      "pattern": "*.ru",
-      "keyword": "geo-blocking",
-      "created_at": "2024-01-10T12:00:00"
-    },
-    {
-      "pattern": "*spam*",
-      "keyword": "malicious-content",
-      "created_at": "2024-01-05T09:15:30"
-    }
-  ],
-  "count": 2,
-  "timestamp": "2024-01-15T10:30:45.123456"
-}
-```
-
-**Use Case:** Security audit, view firewall rules
-
-#### POST /api/v1/blocked-domains
-
-Add domain pattern to blocklist.
-
-**Request:**
-```json
-{
-  "pattern": "*.malicious.com",
-  "description": "Known malicious domain"
-}
-```
-
-**Pattern Types:**
-- `*.ru` - Wildcard suffix (all .ru domains)
-- `*spam*` - Keyword wildcard (contains "spam")
-- `example.com` - Exact match
-
-**Response:**
-```json
-{
-  "success": true,
-  "message": "Added *.malicious.com",
-  "timestamp": "2024-01-15T10:30:45.123456"
-}
-```
-
-**Use Case:** Block malicious sites, geo-restrictions, spam
-
-#### DELETE /api/v1/blocked-domains
-
-Remove domain pattern from blocklist.
-
-**Query Parameters:**
-- `pattern` (required): Domain pattern to unblock
-- `keyword` (required): Authorization keyword (from env var)
-
-**Security:** Requires `BLOCKED_DOMAIN_KEYWORD` environment variable
-
-**Response:**
-```json
-{
-  "success": true,
-  "message": "Removed *.ru",
-  "timestamp": "2024-01-15T10:30:45.123456"
-}
-```
-
-### Help
-
-#### GET /api/v1/help
-
-Tool documentation for LLM providers (no authentication required).
-
-**Response:**
-```json
-{
-  "success": true,
-  "tools": [
-    {
-      "name": "crawl_url",
-      "example": "Crawl http://www.example.com without storing",
-      "parameters": "url: string"
-    },
-    {
-      "name": "crawl_and_store",
-      "example": "Crawl and permanently store https://github.com/...",
-      "parameters": "url: string, tags?: string, retention_policy?: string"
-    }
-  ],
-  "api_info": {
-    "base_url": "/api/v1",
-    "authentication": "Bearer token required in Authorization header",
-    "public_endpoints": {
-      "/health": {...},
-      "/api/v1/help": {...}
-    }
-  }
-}
-```
-
-**Use Case:** LLM tool discovery, API documentation
-
-## Search Modes
-
-### Comparison Table
-
-| Feature | Simple | KG Search | Enhanced |
-|---------|--------|-----------|----------|
-| **Speed** | ~100-500ms | ~500-2000ms | ~1-3s |
-| **Vector Search** | ✓ | ✓ | ✓ |
-| **Knowledge Graph** | ✗ | ✓ | ✓ |
-| **Entity Expansion** | ✗ | Optional | Always |
-| **Full Markdown** | ✗ | ✗ | ✓ |
-| **Multi-Signal Ranking** | ✗ | ✓ | ✓ (5 signals) |
-| **Configurable Limits** | ✓ | ✓ | ✗ (fixed) |
-| **Best For** | Quick lookups | Research | Deep analysis |
-
-### When to Use Each Mode
-
-**Simple Search** (`/api/v1/search`):
-- Quick fact lookups
-- Known topic searches
-- Performance-critical applications
-- No entity relationships needed
-
-**KG Search** (`/api/v1/search/kg`):
-- Entity-focused queries
-- Relationship exploration
-- Configurable result counts
-- Balanced speed/quality
-
-**Enhanced Search** (`/api/v1/search/enhanced`):
-- Comprehensive research
-- Complex topics
-- Full content needed
-- Best possible results
-
-## Authentication & Security
-
-### Bearer Token Authentication
-
-All endpoints except `/health` and `/api/v1/help` require Bearer token authentication:
-
+*No MCP server is used – all calls are direct Python imports, reducing latency and image size.*
+
+---  
+
+## Key Concepts & Terminology
+| Term | Meaning |
+|------|---------|
+| **Crawl4AI** | External micro‑service that fetches a page, extracts text/markdown, and returns embeddings. |
+| **Retention Policy** | Determines how stored content is kept: `permanent`, `session_only` (auto‑deleted after 24 h), or `30_days`. |
+| **Session** | Short‑lived context tied to an API key, tracked for activity and request counting. |
+| **Toolactions** | Self‑contained modules under `api/toolactions/` that implement the actual business logic (crawling, searching, stats). |
+| **KG (Knowledge Graph)** | Neo4j‑backed graph that stores entity relationships for enriched search. |
+| **V2 Endpoints** | Newer API version that uses the unified `toolactions` layer; older V1 endpoints are deprecated. |
+| **OpenAPI Customisation** | `api/server.py` overrides the default schema to remove `anyOf` patterns for easier consumption by LLM agents. |
+
+---  
+
+## Installation & Quick‑Start
 ```bash
-curl -X POST http://localhost:8080/api/v1/crawl/store \
-  -H "Authorization: Bearer your-api-key-here" \
-  -H "Content-Type: application/json" \
-  -d '{"url": "https://example.com"}'
-```
-
-### API Key Configuration
-
-**Environment Variables:**
-```bash
-# At least ONE required:
-LOCAL_API_KEY=your-secret-api-key-here
-REMOTE_API_KEY_2=optional-second-api-key
-```
-
-**Multiple Keys:**
-- Supports up to 2 API keys (primary + secondary)
-- Any valid key is accepted
-- Useful for key rotation without downtime
-
-### Rate Limiting
-
-**Default Configuration:**
-```
-Maximum: 60 requests per minute per API key
-Window: Sliding 60-second window
-Status Code: 429 Too Many Requests (when exceeded)
-```
-
-**Environment Configuration:**
-```bash
-RATE_LIMIT_PER_MINUTE=60        # Requests per minute
-ENABLE_RATE_LIMIT=true          # Can be disabled
-```
-
-**Rate Limit Response:**
-```json
-{
-  "detail": "Rate limit exceeded. Try again later."
-}
-```
-
-### Session Management
-
-**Features:**
-- Created per API key on first request
-- 24-hour session timeout
-- Auto-cleanup every hour
-- 16-character session ID (SHA256-based)
-
-**Session Data:**
-```python
-{
-  "api_key": "token",
-  "session_id": "abc123def456",
-  "created_at": "2024-01-15T10:30:45",
-  "last_activity": "2024-01-15T10:35:20",
-  "requests_count": 42
-}
-```
-
-### Security Features
-
-**5-Layer Validation:**
-
-1. **Layer 1 - Pydantic Models**:
-   - Type validation (str, int, float, bool)
-   - Required vs optional fields
-   - Length limits (255-500 chars)
-   - Range validation (1-250 for integers)
-
-2. **Layer 2 - URL Validation**:
-   - HTTP/HTTPS only
-   - Valid hostname required
-   - Blocks localhost (127.0.0.1, ::1)
-   - Blocks private IPs (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16)
-   - Blocks link-local (169.254.0.0/16)
-   - Blocks cloud metadata endpoints (169.254.169.254, 100.100.100.200)
-   - Blocks .local, .internal, .corp domains
-
-3. **Layer 3 - SQL Injection Prevention**:
-   - Blocks SQL keywords (SELECT, INSERT, DROP, etc.)
-   - Context-aware detection
-   - NULL byte filtering
-
-4. **Layer 4 - Operation Validation**:
-   - Business logic validation in robaimodeltools
-   - Database integrity checks
-   - Service availability checks
-
-5. **Layer 5 - Response Validation**:
-   - HTTP status code verification
-   - JSON serialization check
-   - Timestamp presence
-   - Success flag accuracy
-
-### HTTP Security Headers
-
-- **CORS**: Configurable (default: * for all origins)
-- **X-Process-Time**: Performance tracking header
-- **Standard Status Codes**: Proper HTTP semantics
-
-## Configuration
-
-### Environment Variables
-
-Create a `.env` file in the robairagapi directory:
-
-```bash
-# API Server Configuration
-SERVER_HOST=0.0.0.0
-SERVER_PORT=8080
-
-# Authentication (at least one required)
-LOCAL_API_KEY=your-secret-key-here
-REMOTE_API_KEY_2=optional-second-key
-
-# Rate Limiting
-RATE_LIMIT_PER_MINUTE=60
-ENABLE_RATE_LIMIT=true
-
-# CORS
-ENABLE_CORS=true
-CORS_ORIGINS=*
-
-# Logging
-LOG_LEVEL=INFO
-
-# Domain Blocking (for DELETE operations)
-BLOCKED_DOMAIN_KEYWORD=your-auth-keyword
-```
-
-### Configuration Validation
-
-The config module validates critical settings on startup:
-
-**Required:**
-- At least one API key (LOCAL_API_KEY or REMOTE_API_KEY_2)
-
-**Optional (uses defaults):**
-- All other settings
-
-### Startup Output
-
-```
-🚀 Starting RobAI RAG API Bridge on 0.0.0.0:8080
-   MCP Server: localhost:3000
-   CORS: Enabled
-   Rate Limiting: Enabled
-
-   API Docs: http://0.0.0.0:8080/docs
-   Health Check: http://0.0.0.0:8080/health
-```
-
-## Installation
-
-### Prerequisites
-
-- Python 3.11+
-- Docker (for containerized deployment)
-- [robaimodeltools](../robaimodeltools) (shared library dependency)
-- Crawl4AI service running on port 11235
-- SQLite database access
-
-### Install Dependencies
-
-```bash
+# Clone (already present at /home/robiloo/Documents/robaitools)
 cd robairagapi
 
-# Install Python packages
-pip install -r requirements.txt
+# Optional: create a virtual environment
+python3 -m venv .venv
+source .venv/bin/activate
 
-# Install robaimodeltools dependencies
-pip install -r ../robaimodeltools/requirements.txt
-```
+# Install dependencies
+pip install -r requirements.txt   # fastapi, uvicorn, pydantic, python-dotenv, httpx, etc.
 
-### Configure Environment
-
-```bash
-# Copy example configuration
+# Copy example environment file and edit
 cp .env.example .env
+nano .env   # At minimum set OPENAI_API_KEY; adjust other vars as needed
 
-# Edit .env with your settings
-nano .env
-```
-
-### Start the Service
-
-**Development Mode:**
-```bash
+# Run in development mode
 python main.py
-```
-
-**Production Mode:**
-```bash
+# Or production mode with uvicorn workers
 uvicorn api.server:app --host 0.0.0.0 --port 8080 --workers 4
 ```
 
-**With Gunicorn:**
+**Health check** (should always return 200):
 ```bash
-gunicorn api.server:app \
-  --workers 4 \
-  --worker-class uvicorn.workers.UvicornWorker \
-  --bind 0.0.0.0:8080
-```
-
-### Verify Installation
-
-```bash
-# Check health
 curl http://localhost:8080/health
-
-# View API docs
-open http://localhost:8080/docs
 ```
 
-## Usage Examples
+---  
 
-### Basic Crawling
+## Configuration (Environment Variables)
+All settings are read via `python-dotenv` in `config.py`. The most important variables are:
 
-**Python:**
-```python
-import requests
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `SERVER_HOST` | `0.0.0.0` | Interface to bind FastAPI |
+| `SERVER_PORT` | `8080` | HTTP port |
+| `OPENAI_API_KEY` | *(none)* | Primary bearer token – **required** |
+| `RATE_LIMIT_PER_MINUTE` | `60` | Max requests per API key in a sliding 60‑second window |
+| `ENABLE_RATE_LIMIT` | `true` | Set `false` to disable rate limiting (e.g., bulk migrations) |
+| `ENABLE_CORS` | `true` | Enables CORS; origins defined by `CORS_ORIGINS` |
+| `CORS_ORIGINS` | `*` | Comma‑separated list of allowed origins |
+| `LOG_LEVEL` | `INFO` | Python logging level |
+| `BLOCKED_DOMAIN_KEYWORD` | *(none)* | Secret used to authorize domain unblock requests |
+| `CRAWL4AI_URL` | `http://localhost:11235` | URL of the Crawl4AI micro‑service |
+| `TOOLS_SERVICE_URL` | `http://localhost:8099` | URL of the optional LLM tool‑discovery service (used by `/api/v1/tools/list`) |
+| `TOOLS_REFRESH_INTERVAL` | `30` | Seconds between tool‑discovery cache refreshes |
+| `MCP_SERVER_HOST` / `MCP_SERVER_PORT` | `localhost` / `3000` | Retained for backwards compatibility – not used by current code |
+| `ENABLE_MAC_VALIDATION` / `STRICT_AUTH_FOR_PFSENSE` | `true` | Advanced security flags (future‑proof, currently unused) |
 
-url = "http://localhost:8080/api/v1/crawl/store"
-headers = {
-    "Authorization": "Bearer your-api-key",
-    "Content-Type": "application/json"
-}
-data = {
-    "url": "https://example.com/article",
-    "tags": "python,tutorial",
-    "retention_policy": "permanent"
-}
+*All variables are automatically type‑cast where appropriate (int, bool, etc.).*
 
-response = requests.post(url, headers=headers, json=data)
-print(response.json())
-```
+---  
 
-**cURL:**
-```bash
-curl -X POST http://localhost:8080/api/v1/crawl/store \
-  -H "Authorization: Bearer your-api-key" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "url": "https://example.com/article",
-    "tags": "python,tutorial",
-    "retention_policy": "permanent"
-  }'
-```
+## Authentication & Security Model
+1. **Bearer Token** – Every protected endpoint expects an `Authorization: Bearer <token>` header.  
+2. **Token Normalisation** – `auth.py` accepts any case/whitespace variation (`bearer`, `BEARER`, multiple spaces).  
+3. **Token Validation** – Only the value of `OPENAI_API_KEY` (and any additional keys you manually add) are accepted.  
+4. **Failed Authentication** – Returns **404 Not Found** to obscure the existence of the endpoint.  
+5. **Rate‑Limit Exceeded** – Also returns 404 for the same reason.  
 
-### Deep Crawling
+*Security logs are printed to stdout with token previews (first 8 characters) for audit purposes.*
 
-```python
-data = {
-    "url": "https://docs.python.org",
-    "max_depth": 2,
-    "max_pages": 20,
-    "include_external": False,
-    "tags": "python,documentation",
-    "retention_policy": "permanent"
-}
+---  
 
-response = requests.post(
-    "http://localhost:8080/api/v1/crawl/deep/store",
-    headers=headers,
-    json=data
-)
-print(f"Crawled {response.json()['data']['pages_crawled']} pages")
-```
+## Rate Limiting & Session Management
+- **Sliding Window**: `RateLimiter` stores timestamps per API key, pruning entries older than 60 seconds.  
+- **Disabling**: Set `ENABLE_RATE_LIMIT=false` for bulk operations.  
+- **Sessions**: `SessionManager` creates a 16‑character SHA‑256‑derived session ID on each successful request.  
+  - Stored in an in‑memory dict with `created_at`, `last_activity`, and `requests_count`.  
+  - Expire after **24 hours** of inactivity; cleanup runs hourly via a background task (`session_cleanup_task`).  
 
-### Simple Search
+---  
 
-```python
-data = {
-    "query": "FastAPI authentication patterns",
-    "limit": 10,
-    "tags": "python,web"
-}
+## API Reference (V2 Endpoints)
 
-response = requests.post(
-    "http://localhost:8080/api/v1/search",
-    headers=headers,
-    json=data
-)
+All request/response bodies are defined in `api/models.py`. The OpenAPI schema is automatically generated and **simplified** (no `anyOf` patterns) for easier consumption by AI agents.
 
-for result in response.json()['data']['results']:
-    print(f"{result['title']} ({result['similarity_score']:.2f})")
-    print(f"  {result['url']}")
-```
+### Health & Status
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| `GET` | `/health` | **No** | Simple health check; always returns 200 with `status: "healthy"`. |
+| `GET` | `/api/v1/status` | **Yes** | Detailed service status (`api_status`, `mcp_status`, `components` map). |
 
-### Enhanced Search
+### Crawling (V2)
+| Method | Path | Model | Description |
+|--------|------|-------|-------------|
+| `POST` | `/api/v2/crawl` | `CrawlRequest` | Crawl a URL **without** storing. Optional `max_chars` (5 k‑25 k). |
+| `POST` | `/api/v2/crawl/store` | `CrawlStoreRequest` | Crawl **and permanently store** content. Optional `tags`, `retention_policy`. |
+| `POST` | `/api/v2/crawl/temp` | `CrawlStoreRequest` | Crawl **and store temporarily** (`session_only`). |
+| `POST` | `/api/v2/crawl/deep/store` | `DeepCrawlStoreRequest` | Recursive crawl up to `max_depth` (1‑5) and `max_pages` (1‑250). Supports external links, score thresholds, and timeout. |
 
-```python
-data = {
-    "query": "React performance optimization techniques",
-    "tags": "javascript,react"
-}
+**Common behaviours**  
+- URL validation via `api.validation.validate_url`.  
+- Errors → `400 Bad Request` with explicit messages.  
+- Internal failures → `500` with stack trace logged.  
 
-response = requests.post(
-    "http://localhost:8080/api/v1/search/enhanced",
-    headers=headers,
-    json=data
-)
-
-# Always returns exactly 3 RAG results with full markdown
-for result in response.json()['data']['rag_results']:
-    print(f"\n{result['title']}")
-    print(result['markdown'])  # Full markdown content
-```
+### Search (V2)
+| Method | Path | Model | Description |
+|--------|------|-------|-------------|
+| `POST` | `/api/v2/search` | `SearchRequest` | GraphRAG hybrid search (vector + KG). Parameters: `term`, `depth` (`low|medium|high|all`), `limit`. |
+| `POST` | `/api/v2/web_search` | `WebSearchRequest` | Proxy to **Serper** (Google) API; returns titles, URLs, snippets. |
+| `GET` | `/api/v2/stats` & `/api/v2/db/stats` | – | Database statistics (content count, vector count, storage size, etc.). |
+| `GET` | `/api/v2/health/containers` | – | Docker container health (name, status, state). |
 
 ### Memory Management
+| Method | Path | Model | Description |
+|--------|------|-------|-------------|
+| `GET` | `/api/v1/memory` *(deprecated)* | – | List stored content; supports `filter` and `limit`. |
+| `DELETE` | `/api/v1/memory` *(deprecated)* | `ForgetUrlRequest` | Remove a specific URL from storage. |
+| `DELETE` | `/api/v1/memory/temp` *(deprecated)* | – | Clear all `session_only` content. |
 
-**List Content:**
-```python
-response = requests.get(
-    "http://localhost:8080/api/v1/memory?retention_policy=permanent&limit=50",
-    headers=headers
-)
+*Future releases will migrate these to `/api/v2/memory/*`.*
 
-for item in response.json()['content']:
-    print(f"{item['title']} - {item['word_count']} words")
-```
+### Domain Management
+| Method | Path | Model | Description |
+|--------|------|-------|-------------|
+| `GET` | `/api/v1/blocked-domains` | – | List all blocked domain patterns. |
+| `POST` | `/api/v1/blocked-domains` | `BlockedDomainRequest` | Add a new pattern (e.g., `*.ru`). |
+| `DELETE` | `/api/v1/blocked-domains` | `UnblockDomainRequest` | Remove a pattern; requires `BLOCKED_DOMAIN_KEYWORD`. |
 
-**Delete Content:**
-```python
-response = requests.delete(
-    "http://localhost:8080/api/v1/memory?url=https://example.com/old-article",
-    headers=headers
-)
-print(response.json()['message'])
-```
+### Help / Tool Discovery
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/api/v1/tools/list` | **Public** endpoint returning LLM‑compatible tool definitions (no auth). |
+| `GET` | `/api/v2/help` | Authenticated endpoint describing all V2 tools, parameters, and examples. |
 
-### Domain Blocking
+### OpenAPI Customisation
+`api/server.py` overrides `app.openapi` with `custom_openapi()` which:
+- **Simplifies** component schemas (removes `anyOf`).  
+- **Adds** an `X-Process-Time` header to every response.  
+- **Caches** the generated schema for performance.  
 
-**Add Block:**
-```python
-data = {
-    "pattern": "*.spam.com",
-    "description": "Known spam domain"
+---  
+
+## Internal Module Walk‑through
+Below is a concise map of the most relevant source files, their responsibilities, and notable implementation details.
+
+| Module | Path | Responsibility | Highlights |
+|--------|------|----------------|------------|
+| **Configuration** | `config.py` | Reads env vars, validates required keys (`OPENAI_API_KEY`), provides class‑level constants (host, port, CORS, etc.). | Uses `dotenv.load_dotenv()`; raises `ValueError` on missing required keys. |
+| **Authentication** | `api/auth.py` | Bearer token validation, rate limiting, session creation, session cleanup. | Normalises tokens, logs failed attempts (first 8 chars), returns 404 on auth failures to hide endpoint existence. |
+| **Models** | `api/models.py` | Pydantic request/response schemas; includes validators (`validate_url`, `validate_string_length`). | Centralised validation ensures consistent error handling across endpoints. |
+| **Network Utils** | `api/network_utils.py` | Thin wrapper around `httpx.AsyncClient` for outbound HTTP calls (e.g., Serper API). Handles timeouts and exception translation. |
+| **Security** | `api/security.py` | Implements IP + MAC validation, header‑tampering checks, strict vs relaxed mode, and returns security‑oriented JSON errors. |
+| **Tool Discovery** | `api/tool_discovery.py` | Background client that periodically fetches LLM tool definitions from a configurable service (`TOOLS_SERVICE_URL`). Caches results and exposes via `/api/v1/tools/list`. |
+| **Validation Helpers** | `api/validation.py` | URL safety checks (rejects localhost, private IPs, cloud‑metadata endpoints), and generic string‑length validation. |
+| **Toolactions – Data** | `api/toolactions/data/` | `content_cleaner.py` (post‑crawl HTML sanitisation), `dbdefense.py` (SQL‑injection guard), `storage.py` (centralised error logging). |
+| **Toolactions – Operations** | `api/toolactions/operations/` | **crawl_operations.py** – core crawling logic using `Crawl4AIRAG`. <br> **deep_crawl.py** – recursive BFS crawl with depth/page limits. <br> **search_operations.py** – GraphRAG search pipeline (vector + KG). <br> **serper_search.py** – wrapper for Serper Google Search API. <br> **stats_operations.py** – collects DB statistics (row counts, storage size). <br> **validation.py** – re‑uses `api.validation` helpers for request payloads. <br> **queue_managers.py** – internal async queue for background crawl tasks (not currently exposed). |
+| **Toolactions – Utilities** | `api/toolactions/utilities/blockeddomains.py` | Functions to check URLs against blocked patterns, using simple glob‑style matching. |
+| **Server** | `api/server.py` | FastAPI app creation, middleware registration (security, CORS, process‑time header, V2 logging). Defines all routes, background tasks, and custom OpenAPI schema. |
+| **Entry Point** | `main.py` | Prints startup banner and launches the app via `uvicorn.run`. |
+
+---  
+
+## Detailed Toolactions Overview
+The **toolactions** package houses the business logic that powers every V2 endpoint. It is deliberately isolated from the FastAPI layer to enable unit‑testing without a running server.
+
+### `crawl_operations.py`
+* **`crawl_url`** – Calls the external Crawl4AI service, trims the result to `max_chars`, and returns a JSON‑serialisable dict containing `url`, `title`, `content`, `markdown`, and a success flag.  
+* **`crawl_and_store`** – Extends `crawl_url` by persisting the result via `robaimodeltools.GLOBAL_DB`. Handles `retention_policy` and optional `tags`.  
+* **Error handling** – Wraps all external calls in try/except, logs via `toolactions/data/storage.py`, and raises `ValueError` for client‑side misuse.
+
+### `deep_crawl.py`
+* Implements a **breadth‑first search** across a domain, respecting `max_depth`, `max_pages`, and optional `include_external`.  
+* Utilises a **thread‑pool executor** (`asyncio.to_thread`) to keep the FastAPI event loop responsive.  
+* Returns a summary dict with `pages_crawled`, list of `urls`, and generated `content_ids`.
+
+### `search_operations.py`
+* Orchestrates the **GraphRAG** pipeline:
+  1. **Entity extraction** via `robaimodeltools.search.search_handler`.  
+  2. **Vector similarity** query against the embedding store.  
+  3. **Knowledge‑graph lookup** in Neo4j (if configured).  
+  4. **Hybrid ranking** using five signals (similarity, KG connectivity, recency, tag match, and entity relevance).  
+  5. **Result formatting** – either raw JSON or markdown‑rich payloads.  
+* Supports configurable `depth` levels (`low`, `medium`, `high`, `all`) that control the breadth of KG traversal.
+
+### `serper_search.py`
+* Thin async wrapper around the **Serper** Google Search API. Handles API key injection, pagination (`num_results`), and per‑result character trimming (`max_chars_per_result`).  
+* Returns a list of `title`, `url`, `snippet` entries, mirroring the format expected by downstream LLM tools.
+
+### `stats_operations.py`
+* Queries the SQLite database (`crawl4ai_rag.db`) for **row counts**, **storage size**, **average content length**, and **KG processing stats**.  
+* Provides both a **high‑level** (`/api/v2/stats`) and a **raw DB** (`/api/v2/db/stats`) endpoint.
+
+### `validation.py` (inside operations)
+* Re‑uses the top‑level `api.validation` helpers but also adds **operation‑specific checks** (e.g., ensuring `max_depth` ≤ 5).  
+* Centralises error messages so that the API layer can simply propagate them.
+
+### `queue_managers.py`
+* Implements an **asynchronous job queue** used by the deep‑crawl endpoint to schedule background fetches when the request payload exceeds the synchronous threshold.  
+* Not currently exposed via a public endpoint, but useful for future “fire‑and‑forget” crawling.
+
+---  
+
+## Validation Layer Details
+All incoming payloads pass through **three validation layers**:
+
+1. **Pydantic Model Validation** – Enforced automatically by FastAPI. Each field uses `Field(..., description="…")` and custom validators in `api/models.py`.  
+2. **URL Safety Validation (`api/validation.py`)** – Rejects:
+   * localhost (`127.0.0.1`, `::1`)  
+   * private IPv4 ranges (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`)  
+   * link‑local (`169.254.0.0/16`)  
+   * cloud metadata endpoints (`169.254.169.254`, `100.100.100.200`)  
+   * domain suffixes like `.local`, `.internal`, `.corp`  
+3. **Operation‑Specific Validation** – Implemented in `api/toolactions/operations/validation.py`. Examples:
+   * `max_depth` must be `1 ≤ depth ≤ 5`.  
+   * `max_pages` capped at `250`.  
+   * `timeout` must be between `60` and `1800` seconds.  
+
+When validation fails, a **`400 Bad Request`** is raised with a concise error message; the response body follows the standard error schema:
+```json
+{
+  "success": false,
+  "error": "Detailed validation message",
+  "timestamp": "2025-12-14T10:22:00.123456"
 }
-
-response = requests.post(
-    "http://localhost:8080/api/v1/blocked-domains",
-    headers=headers,
-    json=data
-)
 ```
 
-**Remove Block:**
-```python
-response = requests.delete(
-    "http://localhost:8080/api/v1/blocked-domains?pattern=*.spam.com&keyword=your-auth-keyword",
-    headers=headers
-)
-```
+---  
 
-## Docker Deployment
+## Security Middleware Deep Dive
+`api/security.py` provides a **defence‑in‑depth** request‑inspection pipeline executed **before** any route handler:
 
-### Dockerfile
+| Step | Description | Outcome on Failure |
+|------|-------------|--------------------|
+| **IP Extraction** (`get_client_ip`) | Looks at `X‑Forwarded‑For` (proxy) then `request.client.host`. | Returns `"unknown"` if unavailable. |
+| **MAC Lookup** (`get_mac_address_from_ip`) | Reads `/proc/net/arp` on Linux; returns `None` if ARP cache missing or entry not found. | If MAC validation is enabled and lookup fails, request proceeds (no MAC check). |
+| **PfSense Detection** | Compares client IP to `Config.PFSENSE_IP`. If match, optionally validates MAC against `Config.PFSENSE_MAC`. | Mismatch → **403 Forbidden** (hidden as 404). |
+| **Strict vs Relaxed Mode** | `strict_mode_enabled` determines whether the request undergoes the full “strict” checklist (header tampering, path traversal, method override, protocol downgrade). | Any violation → **404 Not Found** (to hide endpoint). |
+| **Header Checks** | Ensures exactly one `Authorization` header, no duplicate or suspicious headers (`X‑Authorization`, `Proxy-Authorization`, etc.). | Violation → 404. |
+| **Path Checks** | Blocks `".."` and encoded traversal patterns (`%2e%2e`, `%2f`, `%5c`, `%00`). | Violation → 404. |
+| **Method Override Checks** | Detects `X‑HTTP-Method-Override` family of headers. | Violation → 404. |
+| **Protocol Downgrade** | Disallows `Upgrade` header in strict mode (prevents WebSocket hijack). | Violation → 404. |
+| **Logging** | Every security‑relevant event prints a prefixed line (`⚠️  SECURITY:`) to stdout with a timestamp, IP, and brief context. | N/A |
+
+The middleware returns a **JSON error response** with fields `success`, `error`, and `timestamp` to keep client‑side handling consistent.
+
+---  
+
+## Network Utilities
+`api/network_utils.py` supplies two low‑level helpers used by the security middleware and, potentially, by custom extensions:
+
+| Function | Purpose | Edge Cases Handled |
+|----------|---------|-------------------|
+| `get_mac_address_from_ip(ip_address)` | Reads `/proc/net/arp` to resolve a MAC for a given IPv4 address. | Returns `None` if `/proc/net/arp` does not exist, if the IP is not present, or if the MAC format fails validation. |
+| `validate_mac_address(mac_address)` | Simple regex validation (`aa:bb:cc:dd:ee:ff`). | Normalises case, rejects empty strings. |
+| `ip_in_subnet(ip, subnet)` | Checks IPv4 membership for `/24` CIDR only (the most common LAN size). | Returns `False` for malformed CIDR, non‑/24 prefixes, or IPv6 inputs. |
+
+These utilities are deliberately **minimal** to keep the container footprint low; they can be expanded (e.g., using `ipaddress` stdlib) without breaking the public API.
+
+---  
+
+## Error Handling Strategy
+Robairagapi adopts a **centralised error handling** approach:
+
+1. **FastAPI Exception Handlers** – `api/server.py` registers a global `Exception` handler that captures any uncaught exception and returns a **500 Internal Server Error** with a JSON payload:
+   ```json
+   {
+     "success": false,
+     "error": "<exception message>",
+     "timestamp": "<ISO timestamp>"
+   }
+   ```
+2. **HTTPException Propagation** – Business‑logic modules raise `HTTPException(status_code=400, detail="…")` for client‑side errors (validation, missing resources).  
+3. **Toolactions Logging** – Each operation catches unexpected errors, logs them via `toolactions/data/storage.py`, and re‑raises an `HTTPException(500)`.  
+4. **Security Middleware** – Returns **404** on auth/authorization failures to avoid leaking endpoint existence.  
+
+All error responses conform to the same JSON schema, making downstream client code (including AI agents) deterministic.
+
+---  
+
+## Logging & Observability
+- **Standard Output** – The service prints human‑readable log lines prefixed with emojis (`🚀`, `🔧`, `⚠️`, `❌`).  
+- **Request Timing** – Middleware injects an `X-Process-Time` header (milliseconds) for each response.  
+- **Security Audits** – Security events (failed auth, header tampering, MAC mismatches) are logged with the offending token’s first 8 characters (or IP) to aid forensic analysis while avoiding full token leakage.  
+- **Tool Action Errors** – `api/toolactions/data/storage.py` provides a `log_error(name, exc, context)` helper that writes a JSON‑compatible line to stdout, enabling easy parsing by log aggregators (e.g., Loki, Fluentd).  
+- **Future Integration** – The architecture is ready for integration with structured loggers (`structlog`, `loguru`) or external observability platforms (Prometheus metrics could be added as a later enhancement).
+
+---  
+
+## Docker Image & Deployment
+A minimal **Alpine‑based** Dockerfile is located at the repository root (`Dockerfile`). Key points:
 
 ```dockerfile
 FROM python:3.11-slim
 
 WORKDIR /app
 
-# Minimal dependencies
-RUN apt-get update && apt-get install -y curl
+# Install system dependencies (curl for healthchecks)
+RUN apt-get update && apt-get install -y curl && rm -rf /var/lib/apt/lists/*
 
-# Copy code
+# Copy source (including shared robaimodeltools)
 COPY robaimodeltools/ ./robaimodeltools/
-COPY robaidata/ ./robaidata/
 COPY robairagapi/requirements.txt .
 COPY robairagapi/api/ ./api/
 COPY robairagapi/config.py robairagapi/main.py ./
 
-# Install dependencies
+# Install Python deps
 RUN pip install --no-cache-dir -r requirements.txt
 RUN pip install --no-cache-dir -r robaimodeltools/requirements.txt
 
-# Non-root user (security)
+# Run as non‑root user
 RUN useradd -m -u 1000 apiuser
 USER apiuser
 
-# Health check
-HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
-    CMD curl -f http://localhost:8080/health || exit 1
+HEALTHCHECK --interval=30s --timeout=10s \
+  CMD curl -f http://localhost:8080/health || exit 1
 
-# Run
 CMD ["python3", "main.py"]
 ```
 
-**Key Features:**
-- Python 3.11-slim base (~50MB final image)
-- Non-root user for security
-- Built-in health checks
-- Minimal OS dependencies
-
-### Docker Compose
-
-```yaml
-services:
-  robairagapi:
-    build:
-      context: ..
-      dockerfile: robairagapi/Dockerfile
-    image: robairagapi:latest
-    container_name: robairagapi
-    network_mode: "host"
-    restart: unless-stopped
-    environment:
-      - LOCAL_API_KEY=${LOCAL_API_KEY}
-      - RATE_LIMIT_PER_MINUTE=60
-      - SERVER_PORT=8080
-```
-
-### Build and Run
-
+**Running the container**
 ```bash
-# Build image
-docker build -t robairagapi:latest -f robairagapi/Dockerfile .
-
-# Run container
+docker build -t robairagapi:latest -f Dockerfile .
 docker run -d \
   --name robairagapi \
-  --network host \
-  -e LOCAL_API_KEY=your-secret-key \
+  -p 8080:8080 \
+  -e OPENAI_API_KEY=your-secret-key \
+  -e SERVER_HOST=0.0.0.0 \
+  -e SERVER_PORT=8080 \
   robairagapi:latest
-
-# Check logs
-docker logs -f robairagapi
-
-# Check health
-curl http://localhost:8080/health
 ```
 
-## Validation & Error Handling
+The container automatically executes the **healthcheck**; Docker will mark the container unhealthy if `/health` does not return `200`.
 
-### HTTP Status Codes
+---  
 
-| Code | Meaning | Example |
-|------|---------|---------|
-| 200 | Success | All successful operations |
-| 400 | Bad Request | Invalid URL, invalid parameters |
-| 401 | Unauthorized | Missing/invalid API key |
-| 429 | Too Many Requests | Rate limit exceeded |
-| 500 | Internal Server Error | Unexpected exception |
+## Performance Considerations
+| Component | Typical Latency | Bottleneck | Mitigation |
+|-----------|----------------|------------|------------|
+| **Crawl4AI Call** | 2‑10 s (depends on page size) | External service I/O | Increase `uvicorn` workers, cache frequent crawls. |
+| **Vector Search** (`/api/v2/search`) | 100‑500 ms | Embedding index size | Use FAISS/HNSW index, keep it in RAM. |
+| **KG Search** | 500‑2000 ms | Neo4j query complexity | Pre‑compute common relationships, tune Cypher queries. |
+| **Enhanced Search** | 1‑3 s | Combined vector + KG + markdown rendering | Parallelise vector & KG stages (already async). |
+| **Deep Crawl** | 30‑300 s (depends on `max_pages`) | Recursive network I/O | Run as background task, expose a webhook for completion notification. |
 
-### Error Response Format
+The service is **CPU‑bound** during heavy search; allocating multiple Uvicorn workers (`--workers 4`) on a multi‑core host yields near‑linear scaling.
 
-**Standard Error:**
-```json
-{
-  "detail": "Invalid or unsafe URL provided"
-}
-```
+---  
 
-**Global Exception (500):**
-```json
-{
-  "success": false,
-  "error": "Exception message here",
-  "timestamp": "2024-01-15T10:30:45.123456"
-}
-```
+## Development Workflow & Testing
+1. **Live Reload** – `uvicorn api.server:app --reload` watches source files and restarts automatically.  
+2. **Unit Tests** – Place tests under `tests/` (e.g., `tests/test_crawl.py`). Use `pytest` with the `--asyncio` plugin for async endpoints.  
+3. **Static Analysis** – Run `flake8` and `black --check .` to enforce style.  
+4. **Integration Tests** – Spin up a Docker Compose stack that includes the **Crawl4AI** service and a **Neo4j** container; run end‑to‑end tests against `http://localhost:8080`.  
+5. **CI** – A suggested GitHub Actions workflow:  
+   ```yaml
+   jobs:
+     build:
+       runs-on: ubuntu-latest
+       steps:
+         - uses: actions/checkout@v3
+         - name: Set up Python
+           uses: actions/setup-python@v5
+           with:
+             python-version: "3.11"
+         - name: Install deps
+           run: |
+             pip install -r robairagapi/requirements.txt
+             pip install -r robairagapi/tests/requirements.txt
+         - name: Lint
+           run: |
+             pip install flake8 black
+             flake8 .
+             black --check .
+         - name: Test
+           run: pytest robairagapi/tests
+         - name: Build Docker image
+           run: docker build -t robairagapi:ci -f Dockerfile .
+   ```
 
-### Common Errors
+---  
 
-**Invalid URL:**
-```bash
-curl -X POST http://localhost:8080/api/v1/crawl \
-  -H "Authorization: Bearer key" \
-  -d '{"url": "http://localhost:8000"}'
+## Extending the API
+When adding a new endpoint:
 
-# Response (400):
-{"detail": "Invalid or unsafe URL provided"}
-```
+1. **Define a Pydantic model** in `api/models.py` (include validators).  
+2. **Implement business logic** in a new `toolactions/operations/` module (or extend an existing one).  
+3. **Add a route** in `api/server.py` – remember to add the `Depends(verify_api_key)` dependency for protected routes.  
+4. **Update OpenAPI** – the `custom_openapi()` function automatically reflects new models; no manual changes required.  
+5. **Write tests** covering happy path, validation failures, and security edge cases.  
 
-**Missing API Key:**
-```bash
-curl http://localhost:8080/api/v1/status
+---  
 
-# Response (403):
-{"detail": "Not authenticated"}
-```
+## CI/CD Pipeline (Suggested)
+A robust pipeline could include:
 
-**Rate Limited:**
-```bash
-# After 60 requests in one minute:
-# Response (429):
-{"detail": "Rate limit exceeded. Try again later."}
-```
+| Stage | Tools |
+|-------|-------|
+| **Build** | Docker build (multi‑stage for minimal image). |
+| **Static Analysis** | `flake8`, `black`, `mypy` (type checking). |
+| **Unit Tests** | `pytest` with coverage (`--cov`). |
+| **Integration Tests** | Docker Compose bringing up `crawl4ai` + Neo4j; run API smoke tests. |
+| **Security Scan** | `bandit` for Python security linting; `trivy` for container vulnerability scanning. |
+| **Deploy** | Push image to registry; Kubernetes `Deployment` with rolling update strategy; health checks ensure zero‑downtime. |
 
-## Integration
+---  
 
-### With robaimodeltools
+## Contributing Guidelines
+1. **Fork** the repository and create a feature branch (`git checkout -b feature/xyz`).  
+2. **Write code** *and* update documentation (README, docs/*) accordingly.  
+3. **Add tests** for any new functionality.  
+4. **Run linters & tests** locally (`make lint && make test` if a Makefile is provided).  
+5. **Submit a Pull Request** – CI will automatically verify style, tests, and Docker build.  
+6. **Review** – maintainers will check for security implications (especially around URL validation and token handling).  
 
-**Direct Imports:**
-```python
-from robaimodeltools.operations.crawler import Crawl4AIRAG
-from robaimodeltools.data.storage import GLOBAL_DB
-from robaimodeltools.search.search_handler import SearchHandler
-from robaimodeltools.operations.domain_management import (
-    list_blocked_domains,
-    add_blocked_domain,
-    remove_blocked_domain
-)
-```
+---  
 
-**Usage Pattern:**
-```python
-# Initialize
-rag_system = Crawl4AIRAG(crawl4ai_url="http://localhost:11235")
+## License & Contact
+`robairagapi` is released under the **MIT License**.  
+For questions, bug reports, or contribution discussions, please open an issue on the GitHub repository:  
+<https://github.com/Rob-P-Smith/robaitools>
 
-# Operations
-await rag_system.crawl_and_store(url, retention_policy, tags)
-await rag_system.search_knowledge(query, limit, tags)
-GLOBAL_DB.forget(url)
-```
+---  
 
-### With OpenWebUI
-
-**Configuration:**
-```
-Connection Settings:
-- Base URL: http://your-server:8080
-- Auth Type: Bearer Token
-- API Key: your-api-key-here
-- Name: RobAI RAG API
-```
-
-**Supported Operations:**
-- Crawl URLs
-- Store and search content
-- View stored content
-- Manage blocked domains
-
-### Service Communication Flow
-
-```
-OpenWebUI Client
-    ↓ HTTP
-robairagapi (REST API)
-    ↓ Python imports
-robaimodeltools (RAG core)
-    ├→ Crawl4AIRAG → Crawl4AI Service
-    ├→ GLOBAL_DB → SQLite Database
-    └→ SearchHandler → KG Service → Neo4j
-```
-
-## Performance
-
-### Response Times (Typical)
-
-| Endpoint | Time | Notes |
-|----------|------|-------|
-| `/health` | 1ms | Simple response |
-| `/api/v1/status` | 5ms | Config check |
-| `/api/v1/crawl` | 2-10s | Depends on page size |
-| `/api/v1/crawl/store` | 3-15s | Plus DB storage |
-| `/api/v1/search` | 100-500ms | Vector similarity |
-| `/api/v1/search/kg` | 500-2000ms | Includes graph query |
-| `/api/v1/search/enhanced` | 1-3s | Full 5-phase pipeline |
-| `/api/v1/crawl/deep/store` | 30-300s | Depends on max_pages |
-
-### Throughput
-
-- **Rate Limit**: 60 requests/minute/key (default)
-- **Concurrent Connections**: Limited by Uvicorn workers
-- **Default Workers**: 1 (configurable)
-- **Bottleneck**: Crawl4AI service for crawling operations
-
-### Resource Usage
-
-- **Docker Image**: ~50MB
-- **RAM Usage**: 100-300MB (with database loaded)
-- **Per Request**: ~1-5MB (depends on content size)
-- **Sessions Table**: ~1KB per session
-
-### Comparison with Alternatives
-
-| Aspect | robairagapi | mcpragcrawl4ai |
-|--------|-------------|-----------------|
-| **Image Size** | ~50MB | ~600MB |
-| **Dependencies** | 7 packages | Full ML stack |
-| **Startup Time** | ~5 seconds | ~30 seconds |
-| **Memory Usage** | 100-300MB | 1-2GB |
-| **Protocol** | HTTP/JSON | HTTP + gRPC |
-| **Use Case** | External API | Standalone |
-
-## Statistics
-
-### Code Metrics
-
-- **Total Lines**: ~1,200 lines of application code
-- **Main Implementation**: server.py (525 lines)
-- **Pydantic Models**: 12 models (170 lines)
-- **Authentication**: 198 lines
-- **Validation**: 221 lines
-
-### API Endpoints
-
-- **Total Endpoints**: 23
-- **Categories**: 6 (Health, Crawling, Search, Memory, Stats, Domain)
-- **Public Endpoints**: 2 (/health, /api/v1/help)
-- **Authenticated Endpoints**: 21
-
-### Dependencies
-
-- **Python Packages**: 7 direct dependencies
-  - fastapi==0.115.6
-  - uvicorn==0.32.1
-  - pydantic==2.10.4
-  - python-dotenv==1.0.1
-  - httpx==0.28.1
-  - gunicorn==23.0.0
-  - robaimodeltools (local)
-
-### External Services
-
-- **Required**: 2 (Crawl4AI, SQLite)
-- **Optional**: 2 (KG Service, Neo4j)
-- **Monitored**: All 4 services
-
----
-
-## Quick Reference
-
-### Most Common Operations
-
-**Start service:**
-```bash
-docker compose up -d robairagapi
-```
-
-**Check health:**
-```bash
-curl http://localhost:8080/health
-```
-
-**Crawl and store:**
-```bash
-curl -X POST http://localhost:8080/api/v1/crawl/store \
-  -H "Authorization: Bearer YOUR_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{"url": "https://example.com", "tags": "example"}'
-```
-
-**Search:**
-```bash
-curl -X POST http://localhost:8080/api/v1/search \
-  -H "Authorization: Bearer YOUR_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{"query": "your search query", "limit": 10}'
-```
-
-**View API docs:**
-```
-http://localhost:8080/docs
-```
-
----
-
-## Additional Resources
-
-- [QUICKSTART.md](QUICKSTART.md) - 5-minute quickstart guide
-- [robaimodeltools Documentation](../robaimodeltools/README.md) - Core RAG library
-- [FastAPI Documentation](https://fastapi.tiangolo.com)
-- [OpenAPI Specification](http://localhost:8080/openapi.json)
-
-## Contributing
-
-When contributing to robairagapi:
-
-1. **Maintain API Compatibility**: All changes must be backward-compatible
-2. **Update Pydantic Models**: Keep request/response models in sync
-3. **Add Tests**: Test new endpoints and validation logic
-4. **Update Documentation**: Keep this README and OpenAPI specs current
-5. **Follow Security Practices**: Maintain 5-layer validation approach
-
-## License
-
-[Include license information here]
-
-## Contact
-
-[Include contact/support information here]
+*This documentation is intentionally exhaustive to enable AI agents and developers to understand, extend, and safely modify the `robairagapi` codebase without ambiguity.*
